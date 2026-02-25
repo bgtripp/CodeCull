@@ -1,0 +1,47 @@
+"""
+CodeCull — entry point.
+
+Usage:
+    # Run the dashboard (default)
+    python main.py
+
+    # Run the scanner only (prints results to stdout)
+    python main.py scan
+"""
+
+from __future__ import annotations
+
+import sys
+
+
+def _run_dashboard() -> None:
+    import uvicorn
+    uvicorn.run("dashboard.app:app", host="0.0.0.0", port=8000, reload=True)
+
+
+def _run_scan() -> None:
+    from scanner.flag_scanner import run_scan
+
+    candidates = run_scan()
+    if not candidates:
+        print("No stale flags found.")
+        return
+
+    print(f"\nFound {len(candidates)} stale flag candidate(s):\n")
+    for i, c in enumerate(candidates, 1):
+        print(f"  {i}. {c.flag_key}")
+        print(f"     Name:       {c.flag_name}")
+        print(f"     Status:     {c.variation_served} for {c.days_stale} days")
+        print(f"     Files:      {len(c.files_affected)}")
+        print(f"     References: {c.total_lines}")
+        print(f"     Tags:       {', '.join(c.tags)}")
+        print()
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "dashboard"
+
+    if cmd == "scan":
+        _run_scan()
+    else:
+        _run_dashboard()

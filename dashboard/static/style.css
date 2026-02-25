@@ -1,0 +1,350 @@
+/* ============================================================
+   CodeCull Dashboard — CSS
+   ============================================================ */
+
+:root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface-hover: #22263a;
+    --border: #2a2e3e;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --orange: #f97316;
+    --radius: 8px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 1.5rem;
+}
+
+/* ---- Header ---- */
+
+header {
+    border-bottom: 1px solid var(--border);
+    padding: 1.25rem 0;
+}
+
+.header-row {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+}
+
+.logo {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.logo-icon {
+    margin-right: 0.25rem;
+}
+
+.tagline {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+/* ---- Toolbar ---- */
+
+.toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin: 2rem 0 1.25rem;
+}
+
+.toolbar h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+}
+
+/* ---- Buttons ---- */
+
+.btn {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.15s;
+}
+
+.btn-approve {
+    background: var(--green);
+    color: #fff;
+}
+.btn-approve:hover { background: #16a34a; }
+
+.btn-skip {
+    background: var(--surface-hover);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+}
+.btn-skip:hover { background: var(--border); }
+
+.btn-secondary {
+    background: var(--accent);
+    color: #fff;
+}
+.btn-secondary:hover { background: var(--accent-hover); }
+
+.btn-disabled {
+    background: var(--surface-hover);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+/* ---- Cards ---- */
+
+.card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-bottom: 3rem;
+}
+
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+    transition: border-color 0.15s;
+}
+
+.card:hover {
+    border-color: var(--accent);
+}
+
+.card--skipped {
+    opacity: 0.5;
+}
+
+.card--done {
+    border-color: var(--green);
+}
+
+.card--in_progress {
+    border-color: var(--yellow);
+}
+
+.card--error {
+    border-color: var(--red);
+}
+
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.flag-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.flag-key {
+    font-family: var(--mono);
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.flag-desc {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    margin-bottom: 1rem;
+}
+
+/* ---- Badges ---- */
+
+.badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.badge--always-on  { background: rgba(34,197,94,0.15); color: var(--green); }
+.badge--always-off { background: rgba(239,68,68,0.15); color: var(--red); }
+.badge--age        { background: rgba(234,179,8,0.15); color: var(--yellow); }
+
+/* ---- Status dots ---- */
+
+.card-status {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+.status-dot--pending  { background: var(--text-muted); }
+.status-dot--progress { background: var(--yellow); animation: pulse 1.5s infinite; }
+.status-dot--done     { background: var(--green); }
+.status-dot--skipped  { background: var(--text-muted); }
+.status-dot--error    { background: var(--red); }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* ---- Meta row ---- */
+
+.meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    font-size: 0.85rem;
+    margin-bottom: 0.75rem;
+}
+
+.meta-item strong {
+    color: var(--text-muted);
+    margin-right: 0.25rem;
+}
+
+.tag {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    background: var(--surface-hover);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    margin-left: 0.15rem;
+}
+
+/* ---- Details / accordions ---- */
+
+.file-details {
+    margin-bottom: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.file-details summary {
+    cursor: pointer;
+    color: var(--accent);
+    font-weight: 500;
+    padding: 0.25rem 0;
+}
+
+.file-details ul {
+    list-style: none;
+    padding-left: 1rem;
+    margin-top: 0.25rem;
+}
+
+.file-details ul li {
+    padding: 0.15rem 0;
+}
+
+.ref-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+}
+
+.ref-table th,
+.ref-table td {
+    text-align: left;
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.ref-table th {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+/* ---- Session info ---- */
+
+.session-info {
+    background: var(--surface-hover);
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+    margin: 0.75rem 0;
+    font-size: 0.85rem;
+}
+
+.session-info a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.session-info a:hover {
+    text-decoration: underline;
+}
+
+/* ---- Card actions ---- */
+
+.card-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+
+/* ---- Empty state ---- */
+
+.empty-state {
+    text-align: center;
+    padding: 4rem 0;
+    color: var(--text-muted);
+}
+
+/* ---- Footer ---- */
+
+footer {
+    border-top: 1px solid var(--border);
+    padding: 1.5rem 0;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-top: auto;
+}
+
+/* ---- Code ---- */
+
+code {
+    font-family: var(--mono);
+    font-size: 0.85em;
+}
