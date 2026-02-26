@@ -16,8 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -114,13 +115,39 @@ BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
+# ---------------------------------------------------------------------------
+# HTTP Basic Auth (optional — enabled when DASHBOARD_USER is set)
+# ---------------------------------------------------------------------------
+_security = HTTPBasic(auto_error=False)
+
+_AUTH_USER = os.getenv("DASHBOARD_USER", "")
+_AUTH_PASS = os.getenv("DASHBOARD_PASS", "")
+
+
+async def _check_auth(
+    credentials: HTTPBasicCredentials | None = Depends(_security),
+) -> None:
+    """Require HTTP Basic Auth when ``DASHBOARD_USER`` is configured."""
+    if not _AUTH_USER:
+        return  # auth disabled
+    if (
+        credentials is None
+        or credentials.username != _AUTH_USER
+        or credentials.password != _AUTH_PASS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+async def index(request: Request, _auth: None = Depends(_check_auth)):
     """Main dashboard page.
 
     On every load we re-check each PR's status on GitHub.  Merged or
@@ -142,7 +169,7 @@ async def index(request: Request):
 
 
 @app.post("/skip/{flag_key}")
-async def skip_flag(flag_key: str):
+async def skip_flag(flag_key: str, _auth: None = Depends(_check_auth)):
     """Mark a flag as skipped."""
     candidate = _find_candidate(flag_key)
     if candidate is not None:
@@ -151,7 +178,7 @@ async def skip_flag(flag_key: str):
 
 
 @app.get("/status/{flag_key}")
-async def flag_status(flag_key: str):
+async def flag_status(flag_key: str, _auth: None = Depends(_check_auth)):
     """Return JSON status for a flag (used by the dashboard for polling)."""
     session_info = _sessions.get(flag_key, {})
     candidate = _find_candidate(flag_key)
