@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}CodeCull &mdash; Sign in{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+    <div class="auth-card">
+        <h2 class="auth-title">Sign in to CodeCull</h2>
+        <p class="auth-subtitle">Enter your email to receive a one-time passcode</p>
+
+        {% if error %}
+        <div class="auth-error">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="/auth/login" class="auth-form">
+            <label for="email" class="auth-label">Email address</label>
+            <input
+                type="email"
+                id="email"
+                name="email"
+                class="auth-input"
+                placeholder="you@company.com"
+                required
+                autofocus
+            />
+            <button type="submit" class="btn btn-secondary auth-btn">Send passcode</button>
+        </form>
+
+    </div>
+</div>
+{% endblock %}

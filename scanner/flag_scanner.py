@@ -1,6 +1,6 @@
 """
 Scanner — finds feature flag usage in a codebase and cross-references a
-mock LaunchDarkly service to identify stale flags.
+feature flag service (Unleash or mock JSON) to identify stale flags.
 
 A flag is considered *stale* when:
   - It has been serving a single variation (always-on or always-off) in
@@ -10,16 +10,20 @@ A flag is considered *stale* when:
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +111,7 @@ def scan_codebase(repo_path: str, extensions: tuple[str, ...] = (".py",)) -> dic
 
 
 # ---------------------------------------------------------------------------
-# LaunchDarkly mock reader
+# Flag service readers (Unleash or mock JSON fallback)
 # ---------------------------------------------------------------------------
 
 def load_ld_flags(ld_data_path: str) -> dict:
@@ -115,6 +119,112 @@ def load_ld_flags(ld_data_path: str) -> dict:
     with open(ld_data_path, encoding="utf-8") as fh:
         data = json.load(fh)
     return {f["key"]: f for f in data["flags"]}
+
+
+def _unleash_basic_auth() -> tuple[str, str] | None:
+    """Return (username, password) for HTTP Basic Auth if configured.
+
+    Credentials MUST be provided via environment variables — no defaults
+    are compiled into the source.
+    """
+    user = os.getenv("UNLEASH_ADMIN_USER", "")
+    password = os.getenv("UNLEASH_ADMIN_PASSWORD", "")
+    if user and password:
+        return (user, password)
+    return None
+
+
+def load_unleash_flags(base_url: str, environment: str = "production") -> dict:
+    """Fetch flags from Unleash Admin API and normalise to the LD-like schema.
+
+    Returns a dict keyed by flag name (key) with the same shape the
+    ``analyse_flags`` function expects, so the rest of the pipeline is
+    unchanged.
+    """
+    api_token = os.getenv("UNLEASH_ADMIN_TOKEN", "")
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    auth = None
+
+    if api_token:
+        headers["Authorization"] = api_token
+    else:
+        # Use HTTP Basic Auth
+        auth = _unleash_basic_auth()
+
+    project = os.getenv("UNLEASH_PROJECT", "default")
+    url = f"{base_url}/api/admin/projects/{project}/features"
+    logger.info("Fetching flags from Unleash: %s", url)
+
+    with httpx.Client(timeout=30) as client:
+        resp = client.get(url, headers=headers, auth=auth)
+        resp.raise_for_status()
+
+    data = resp.json()
+    features = data.get("features", [])
+
+    # Owner email/name from env (Unleash OSS doesn't track per-flag owners)
+    owner_email = os.getenv("FLAG_OWNER_EMAIL", "")
+    owner_name = os.getenv("FLAG_OWNER_NAME", "")
+
+    normalised: dict[str, dict] = {}
+    for feat in features:
+        name = feat["name"]
+        created_at = feat.get("createdAt") or None
+        stale = feat.get("stale", False)
+
+        # Find the target environment
+        env_data: dict = {}
+        for env in feat.get("environments", []):
+            if env.get("name") == environment:
+                env_data = env
+                break
+
+        enabled = env_data.get("enabled", False)
+
+        # Detect percentage rollout from strategies
+        strategies = env_data.get("strategies", [])
+        is_rollout = False
+        rollout_pct: int | None = None
+        for strat in strategies:
+            if strat.get("name") == "flexibleRollout":
+                pct = int(strat.get("parameters", {}).get("rollout", "100"))
+                if pct < 100:
+                    is_rollout = True
+                    rollout_pct = pct
+
+        # Build the LD-like structure
+        if enabled:
+            variation_served = 0  # True / Enabled
+        else:
+            variation_served = 1  # False / Disabled
+
+        normalised[name] = {
+            "key": name,
+            "name": name.replace("-", " ").title(),
+            "description": feat.get("description", ""),
+            "kind": "boolean",
+            "creation_date": created_at,
+            "variations": [
+                {"value": True, "name": "Enabled"},
+                {"value": False, "name": "Disabled"},
+            ],
+            "on": enabled,
+            "percentage_rollout": {"weight": rollout_pct} if is_rollout else None,
+            "environments": {
+                "production": {
+                    "on": enabled,
+                    "variation_served": variation_served,
+                    "variation_served_since": created_at,
+                },
+            },
+            "tags": [t.get("value", "") for t in feat.get("tags", [])],
+            "stale": stale,
+            "maintainer_email": owner_email,
+            "maintainer_name": owner_name,
+        }
+
+    logger.info("Loaded %d flags from Unleash", len(normalised))
+    return normalised
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +341,32 @@ def _sanitize(text: str, token: str) -> str:
     return text
 
 
+def _download_tarball() -> str:
+    """Download the repo as a tarball via GitHub API (no git required)."""
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    token = os.getenv("GITHUB_TOKEN", "")
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    url = f"https://api.github.com/repos/{repo_slug}/tarball"
+    logger.info("Downloading tarball for %s via GitHub API", repo_slug)
+
+    with httpx.Client(follow_redirects=True, timeout=120) as client:
+        resp = client.get(url, headers=headers)
+        resp.raise_for_status()
+
+    tmp = tempfile.mkdtemp(prefix="codecull-target-")
+    with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz") as tar:
+        tar.extractall(tmp)  # noqa: S202
+
+    # GitHub tarballs extract into a single top-level directory
+    entries = list(Path(tmp).iterdir())
+    if len(entries) == 1 and entries[0].is_dir():
+        return str(entries[0])
+    return tmp
+
+
 def clone_target_repo() -> str:
     """Clone the target GitHub repo into a temp directory and return its path.
 
@@ -239,8 +375,19 @@ def clone_target_repo() -> str:
 
     If ``GITHUB_TOKEN`` is set, it is used to authenticate the clone
     (required for private repos).
+
+    Falls back to downloading a tarball via GitHub API when ``git`` is not
+    available (e.g. in containerised deployments).
     """
     global _cloned_repo_dir
+
+    # Check if git is available
+    if not shutil.which("git"):
+        if _cloned_repo_dir and Path(_cloned_repo_dir).exists():
+            return _cloned_repo_dir
+        logger.info("git not found — falling back to GitHub API tarball download")
+        _cloned_repo_dir = _download_tarball()
+        return _cloned_repo_dir
 
     repo_url, token = _build_repo_url()
 
@@ -290,10 +437,19 @@ def run_scan(
     repo_path: str | None = None,
     ld_data_path: str | None = None,
 ) -> list[FlagCandidate]:
-    """Run a full scan and return stale flag candidates."""
+    """Run a full scan and return stale flag candidates.
+
+    Uses Unleash Admin API when ``UNLEASH_URL`` is set, otherwise falls
+    back to the mock LaunchDarkly JSON file.
+    """
     repo_path = repo_path or get_target_repo_path()
-    ld_data_path = ld_data_path or os.getenv("MOCK_LD_DATA_PATH", "./mock_launchdarkly.json")
+
+    unleash_url = os.getenv("UNLEASH_URL", "")
+    if unleash_url:
+        flag_data = load_unleash_flags(unleash_url)
+    else:
+        ld_data_path = ld_data_path or os.getenv("MOCK_LD_DATA_PATH", "./mock_launchdarkly.json")
+        flag_data = load_ld_flags(ld_data_path)
 
     code_flags = scan_codebase(repo_path)
-    ld_flags = load_ld_flags(ld_data_path)
-    return analyse_flags(code_flags, ld_flags)
+    return analyse_flags(code_flags, flag_data)
