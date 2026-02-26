@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -36,6 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # ---------------------------------------------------------------------------
 _candidates: list[FlagCandidate] = []
 _sessions: dict[str, dict] = {}  # flag_key -> {session_id, url, status, pr_url}
+_last_scan_time: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -45,9 +47,10 @@ _sessions: dict[str, dict] = {}  # flag_key -> {session_id, url, status, pr_url}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run the scanner once at startup to populate candidates."""
-    global _candidates
+    global _candidates, _last_scan_time
     logger.info("Running initial scan...")
     _candidates = run_scan()
+    _last_scan_time = datetime.now(timezone.utc)
     logger.info("Found %d stale flag candidates", len(_candidates))
     yield
 
@@ -76,6 +79,7 @@ async def index(request: Request):
             "request": request,
             "candidates": _candidates,
             "sessions": _sessions,
+            "last_scan_time": _last_scan_time,
         },
     )
 
@@ -83,8 +87,9 @@ async def index(request: Request):
 @app.post("/scan")
 async def rescan():
     """Re-run the scanner and redirect back to the dashboard."""
-    global _candidates
+    global _candidates, _last_scan_time
     _candidates = run_scan()
+    _last_scan_time = datetime.now(timezone.utc)
     return RedirectResponse(url="/", status_code=303)
 
 
