@@ -216,12 +216,22 @@ def _send_slack_ready_notification(
 
     text = (
         f":recycle: *CodeCull: {n} PR{'s' if n != 1 else ''} ready for review*\n\n"
-        f"Dead code cleanup PRs are ready for:\n{flag_list}\n\n"
-        f":link: *<{dashboard_url}|Open Dashboard>*"
+        f"Dead code cleanup PRs are ready for:\n{flag_list}"
     )
 
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Open Dashboard"},
+                    "url": dashboard_url,
+                    "style": "primary",
+                }
+            ],
+        },
     ]
 
     send_dm(slack_user_id, text, blocks)

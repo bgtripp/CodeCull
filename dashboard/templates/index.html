@@ -74,26 +74,35 @@
         {% if sessions.get(c.flag_key) and sessions[c.flag_key].get('session_id') %}
         <div class="session-info">
             {% set s = sessions[c.flag_key] %}
+            {% if c.status == 'in_progress' %}
+            <div class="session-progress">
+                <span class="spinner"></span>
+                <span>Devin is creating a cleanup PR&hellip;</span>
+                <a href="{{ s.url }}" target="_blank" class="session-link">View session</a>
+            </div>
+            {% elif c.status == 'error' %}
+            <div class="session-error-detail">
+                <span>Devin session finished but no PR was created.</span>
+                <a href="{{ s.url }}" target="_blank" class="session-link">View session</a>
+            </div>
+            {% else %}
             <p>
                 <strong>Devin session:</strong>
                 <a href="{{ s.url }}" target="_blank">{{ s.session_id[:12] }}&hellip;</a>
             </p>
+            {% endif %}
         </div>
         {% endif %}
 
+        {% set s = sessions.get(c.flag_key, {}) %}
+        {% if s.pr_url %}
         <div class="card-actions">
-            {% set s = sessions.get(c.flag_key, {}) %}
-            {% if s.pr_url %}
             <a href="{{ s.pr_url }}" class="btn btn-primary" target="_blank">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 Review PR
             </a>
-            {% elif c.status == "in_progress" %}
-            <button class="btn btn-disabled" disabled>Devin is working&hellip;</button>
-            {% elif c.status == "done" %}
-            <span class="btn btn-disabled">PR link pending&hellip;</span>
-            {% endif %}
         </div>
+        {% endif %}
     </div>
 {% endfor %}
 </div>
