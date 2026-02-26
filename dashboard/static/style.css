@@ -376,113 +376,16 @@ code {
     font-size: 0.85em;
 }
 
-/* ---- Dead code diff ---- */
+/* ---- PR impact ---- */
 
-.diff-details {
-    margin-bottom: 0.75rem;
+.pr-impact {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
 }
 
-.diff-details summary {
-    cursor: pointer;
-    font-weight: 500;
-    font-size: 0.85rem;
-    padding: 0.35rem 0;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: var(--text);
-}
-
-.diff-stat {
-    font-weight: 400;
-    color: var(--text-muted);
-    font-size: 0.8rem;
-}
-
-.diff-stat-remove {
+.pr-deletions {
     color: var(--red);
-    font-weight: 600;
-}
-
-.diff-container {
-    margin-top: 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-}
-
-.diff-file {
-    /* No extra spacing between files — they stack inside the container */
-}
-
-.diff-file + .diff-file {
-    border-top: 1px solid var(--border);
-}
-
-.diff-file-header {
-    background: var(--surface-hover);
-    padding: 0.4rem 0.75rem;
+    font-weight: 700;
     font-family: var(--mono);
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    border-bottom: 1px solid var(--border);
-}
-
-.diff-block + .diff-block {
-    border-top: 1px dashed var(--border);
-}
-
-.diff-line {
-    display: flex;
-    font-family: var(--mono);
-    font-size: 0.75rem;
-    line-height: 1.6;
-}
-
-.diff-lineno {
-    display: inline-block;
-    width: 3rem;
-    min-width: 3rem;
-    text-align: right;
-    padding-right: 0.5rem;
-    color: var(--text-muted);
-    opacity: 0.5;
-    user-select: none;
-}
-
-.diff-marker {
-    display: inline-block;
-    width: 1rem;
-    min-width: 1rem;
-    text-align: center;
-    user-select: none;
-}
-
-.diff-text {
-    flex: 1;
-    white-space: pre;
-    overflow-x: auto;
-    padding-right: 0.5rem;
-}
-
-.diff-line--remove {
-    background: rgba(239, 68, 68, 0.1);
-    color: #fca5a5;
-}
-
-.diff-line--remove .diff-marker {
-    color: var(--red);
-}
-
-.diff-line--keep {
-    background: rgba(34, 197, 94, 0.1);
-    color: #86efac;
-}
-
-.diff-line--keep .diff-marker {
-    color: var(--green);
-}
-
-.diff-line--context {
-    color: var(--text-muted);
 }

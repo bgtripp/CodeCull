@@ -12,3 +12,4 @@ build/
 .ruff_cache/
 *.db
 .DS_Store
+.codecull_state.json

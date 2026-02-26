@@ -45,10 +45,21 @@ def _run_scan() -> None:
         print()
 
 
+def _run_sync() -> None:
+    from scanner.pr_sync import sync_state
+
+    result = sync_state()
+    sessions = result.get("sessions", {})
+    ready = [k for k, v in sessions.items() if v.get("pr_url")]
+    print(f"Synced {len(ready)} PR(s) to dashboard state file.")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "dashboard"
 
     if cmd == "scan":
         _run_scan()
+    elif cmd == "sync":
+        _run_sync()
     else:
         _run_dashboard()
