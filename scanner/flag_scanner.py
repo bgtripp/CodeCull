@@ -221,18 +221,21 @@ def clone_target_repo() -> str:
 
     if _cloned_repo_dir and Path(_cloned_repo_dir).exists():
         logger.info("Pulling latest changes in cached clone %s", _cloned_repo_dir)
-        subprocess.run(
+        result = subprocess.run(
             ["git", "pull", "--ff-only"],
             cwd=_cloned_repo_dir,
             capture_output=True,
+            text=True,
             timeout=60,
         )
+        if result.returncode != 0:
+            logger.warning("git pull failed (rc=%d): %s", result.returncode, result.stderr.strip())
         return _cloned_repo_dir
 
     tmp = tempfile.mkdtemp(prefix="codecull-target-")
     logger.info("Cloning %s into %s", repo_url, tmp)
     result = subprocess.run(
-        ["git", "clone", "--depth=1", repo_url, tmp],
+        ["git", "clone", repo_url, tmp],
         capture_output=True,
         text=True,
         timeout=120,
