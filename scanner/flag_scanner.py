@@ -277,6 +277,8 @@ def clone_target_repo() -> str:
 
     # Check if git is available
     if not shutil.which("git"):
+        if _cloned_repo_dir and Path(_cloned_repo_dir).exists():
+            return _cloned_repo_dir
         logger.info("git not found — falling back to GitHub API tarball download")
         _cloned_repo_dir = _download_tarball()
         return _cloned_repo_dir
