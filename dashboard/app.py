@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from scanner.flag_scanner import FlagCandidate, run_scan
 from scanner.github_stats import fetch_pr_stats
+from scanner.pr_sync import sync_state
 from scanner.state_store import load_state, save_state
 
 # Use explicit path so .env is found regardless of CWD / uvicorn reloader.
@@ -404,3 +406,96 @@ def _find_candidate(flag_key: str) -> FlagCandidate | None:
         if c.flag_key == flag_key:
             return c
     return None
+
+
+# ---------------------------------------------------------------------------
+# Sync API
+# ---------------------------------------------------------------------------
+
+_sync_lock = threading.Lock()
+_sync_status: dict = {"running": False, "last_run": None, "result": None, "error": None}
+
+_SYNC_API_TOKEN = os.getenv("SYNC_API_TOKEN", "")
+
+
+def _run_sync_background() -> None:
+    """Execute sync_state in a background thread and reload dashboard state."""
+    global _candidates, _sessions, _pr_stats, _last_scan_time
+    try:
+        result = sync_state(state_path=_STATE_PATH)
+        # Reload dashboard in-memory state from the updated file
+        _candidates = run_scan()
+        _last_scan_time = datetime.now(timezone.utc)
+        state = load_state(_STATE_PATH)
+        _sessions = state.get("sessions", {}) or {}
+        _pr_stats = state.get("pr_stats", {}) or {}
+        _apply_state_to_candidates(_candidates)
+        _candidates.sort(
+            key=lambda c: (
+                _pr_stats.get(c.flag_key, {}).get("deletions", 0),
+                c.days_stale,
+            ),
+            reverse=True,
+        )
+        _sync_status["result"] = {
+            "prs_ready": sum(1 for s in _sessions.values() if s.get("pr_url")),
+            "candidates": len(_candidates),
+        }
+        _sync_status["error"] = None
+        logger.info("Background sync completed successfully")
+    except Exception as exc:
+        logger.exception("Background sync failed")
+        _sync_status["error"] = str(exc)
+    finally:
+        _sync_status["running"] = False
+        _sync_status["last_run"] = datetime.now(timezone.utc).isoformat()
+
+
+@app.post("/api/sync")
+def api_sync(request: Request):
+    """Trigger a full sync (scan + Devin dispatch + Slack notify).
+
+    Gated by either:
+      - A valid OTP session cookie (browser users), OR
+      - A Bearer token matching SYNC_API_TOKEN (GitHub Actions / curl)
+    """
+    # Check session auth first
+    email = _get_session_email(request)
+    if not email:
+        # Fall back to Bearer token auth
+        auth_header = request.headers.get("authorization", "")
+        if _SYNC_API_TOKEN and auth_header == f"Bearer {_SYNC_API_TOKEN}":
+            pass  # authorized via token
+        else:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    if _sync_status["running"]:
+        return {"status": "already_running", "message": "A sync is already in progress."}
+
+    if not _sync_lock.acquire(blocking=False):
+        return {"status": "already_running", "message": "A sync is already in progress."}
+
+    _sync_status["running"] = True
+    _sync_status["error"] = None
+
+    def _worker() -> None:
+        try:
+            _run_sync_background()
+        finally:
+            _sync_lock.release()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"status": "started", "message": "Sync started in background."}
+
+
+@app.get("/api/sync/status")
+def api_sync_status(request: Request):
+    """Check the status of the last/current sync run."""
+    email = _get_session_email(request)
+    if not email:
+        auth_header = request.headers.get("authorization", "")
+        if _SYNC_API_TOKEN and auth_header == f"Bearer {_SYNC_API_TOKEN}":
+            pass
+        else:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+    return _sync_status
