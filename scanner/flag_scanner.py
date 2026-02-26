@@ -179,7 +179,7 @@ def load_unleash_flags(base_url: str, environment: str = "development") -> dict:
     normalised: dict[str, dict] = {}
     for feat in features:
         name = feat["name"]
-        created_at = feat.get("createdAt", "")
+        created_at = feat.get("createdAt") or None
         stale = feat.get("stale", False)
 
         # Find the target environment

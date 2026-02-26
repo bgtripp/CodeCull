@@ -124,14 +124,15 @@ _security = HTTPBasic(auto_error=False)
 _AUTH_USER = os.getenv("DASHBOARD_USER", "")
 _AUTH_PASS = os.getenv("DASHBOARD_PASS", "")
 
+if _AUTH_USER and not _AUTH_PASS:
+    logger.warning("DASHBOARD_USER is set but DASHBOARD_PASS is empty — auth is disabled")
+
 
 async def _check_auth(
     credentials: HTTPBasicCredentials | None = Depends(_security),
 ) -> None:
     """Require HTTP Basic Auth when ``DASHBOARD_USER`` is configured."""
     if not _AUTH_USER or not _AUTH_PASS:
-        if _AUTH_USER and not _AUTH_PASS:
-            logger.warning("DASHBOARD_USER is set but DASHBOARD_PASS is empty — auth is disabled")
         return  # auth disabled
     if (
         credentials is None
