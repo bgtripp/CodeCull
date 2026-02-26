@@ -10,7 +10,7 @@ Sync job  ──▶  Scanner  ──▶  Devin API  ──▶  Draft PRs  ──
   manual)        LD data)      sessions)      flag)           ready")        click → PR)
 ```
 
-1. **Sync job** (`python main.py sync`) scans the target repo for stale flags, checks GitHub for existing cleanup PRs, dispatches Devin for any flags that don't have PRs yet, and sends a Slack DM when PRs are ready.
+1. **Sync job** (`poetry run python main.py sync`) scans the target repo for stale flags, checks GitHub for existing cleanup PRs, dispatches Devin for any flags that don't have PRs yet, and sends a Slack DM when PRs are ready.
 2. **Devin** creates a draft PR per flag — removes the flag check, cleans up dead code paths, updates tests. Sessions are tagged `CodeCull` for easy search in the Devin UI.
 3. **Slack notification** — DMs the engineer: *"CodeCull found N PRs ready for review"* with a link to the dashboard.
 4. **Dashboard** (FastAPI + Jinja2) is the review hub. Cards show flag name, staleness, impact (lines removed, files changed), and a **Review PR** button linking directly to the GitHub PR. Merged or closed PRs are automatically removed on page refresh.
@@ -48,7 +48,7 @@ SLACK_NOTIFY_EMAIL=you@example.com     # Your Slack-associated email
 This scans LogiOps for stale flags, discovers or creates cleanup PRs, and sends a Slack DM:
 
 ```bash
-python main.py sync
+poetry run python main.py sync
 ```
 
 Expected output:
@@ -67,7 +67,7 @@ What happens behind the scenes:
 ### 3. Open the dashboard
 
 ```bash
-python main.py
+poetry run python main.py
 # Open http://localhost:8000
 ```
 
@@ -97,19 +97,19 @@ To reset and run again from scratch:
 rm .codecull_state.json
 
 # Re-run sync (discovers existing PRs, or creates new Devin sessions)
-python main.py sync
+poetry run python main.py sync
 
 # Restart the dashboard
-python main.py
+poetry run python main.py
 ```
 
 ## CLI commands
 
 | Command | Description |
 |---|---|
-| `python main.py` | Start the dashboard (http://localhost:8000) |
-| `python main.py scan` | Run the scanner only (prints stale flags to stdout) |
-| `python main.py sync` | Full sync: scan + discover/create PRs + Slack DM |
+| `poetry run python main.py` | Start the dashboard (http://localhost:8000) |
+| `poetry run python main.py scan` | Run the scanner only (prints stale flags to stdout) |
+| `poetry run python main.py sync` | Full sync: scan + discover/create PRs + Slack DM |
 
 ## Environment variables
 
