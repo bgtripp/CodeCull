@@ -121,18 +121,13 @@ def load_ld_flags(ld_data_path: str) -> dict:
     return {f["key"]: f for f in data["flags"]}
 
 
-def _unleash_login(base_url: str) -> str:
-    """Authenticate to Unleash and return a session cookie string."""
-    user = os.getenv("UNLEASH_ADMIN_USER", "admin")
-    password = os.getenv("UNLEASH_ADMIN_PASSWORD", "unleash4all")
-    with httpx.Client(timeout=30) as client:
-        resp = client.post(
-            f"{base_url}/auth/simple/login",
-            json={"username": user, "password": password},
-        )
-        resp.raise_for_status()
-        # Session cookie is returned in Set-Cookie header
-        return resp.headers.get("set-cookie", "")
+def _unleash_basic_auth() -> tuple[str, str] | None:
+    """Return (username, password) for HTTP Basic Auth if configured."""
+    user = os.getenv("UNLEASH_ADMIN_USER", "")
+    password = os.getenv("UNLEASH_ADMIN_PASSWORD", "")
+    if user and password:
+        return (user, password)
+    return None
 
 
 def load_unleash_flags(base_url: str, environment: str = "production") -> dict:
@@ -144,29 +139,20 @@ def load_unleash_flags(base_url: str, environment: str = "production") -> dict:
     """
     api_token = os.getenv("UNLEASH_ADMIN_TOKEN", "")
     headers: dict[str, str] = {"Content-Type": "application/json"}
-    cookies: dict[str, str] = {}
+    auth = None
 
     if api_token:
         headers["Authorization"] = api_token
     else:
-        # Fall back to session-based auth
-        cookie_str = _unleash_login(base_url)
-        if cookie_str:
-            # Parse "unleash-session=abc123; Path=/; ..." → {"unleash-session": "abc123"}
-            for part in cookie_str.split(","):
-                part = part.strip()
-                if "=" in part and not part.lower().startswith(("path", "expires", "max-age", "domain", "samesite", "httponly", "secure")):
-                    k, v = part.split("=", 1)
-                    # Strip trailing cookie attributes after ;
-                    v = v.split(";")[0]
-                    cookies[k.strip()] = v.strip()
+        # Use HTTP Basic Auth
+        auth = _unleash_basic_auth()
 
     project = os.getenv("UNLEASH_PROJECT", "default")
     url = f"{base_url}/api/admin/projects/{project}/features"
     logger.info("Fetching flags from Unleash: %s", url)
 
     with httpx.Client(timeout=30) as client:
-        resp = client.get(url, headers=headers, cookies=cookies)
+        resp = client.get(url, headers=headers, auth=auth)
         resp.raise_for_status()
 
     data = resp.json()
