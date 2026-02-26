@@ -208,16 +208,27 @@ def analyse_flags(
 _cloned_repo_dir: str | None = None
 
 
+def _build_repo_url() -> str:
+    """Build the clone URL, embedding a GITHUB_TOKEN if available."""
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    token = os.getenv("GITHUB_TOKEN", "")
+    if token:
+        return f"https://x-access-token:{token}@github.com/{repo_slug}.git"
+    return f"https://github.com/{repo_slug}.git"
+
+
 def clone_target_repo() -> str:
     """Clone the target GitHub repo into a temp directory and return its path.
 
     The clone is cached for the lifetime of the process so repeated scans
     do ``git pull`` instead of a full clone.
+
+    If ``GITHUB_TOKEN`` is set, it is used to authenticate the clone
+    (required for private repos).
     """
     global _cloned_repo_dir
 
-    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
-    repo_url = f"https://github.com/{repo_slug}.git"
+    repo_url = _build_repo_url()
 
     if _cloned_repo_dir and Path(_cloned_repo_dir).exists():
         logger.info("Pulling latest changes in cached clone %s", _cloned_repo_dir)
@@ -233,7 +244,8 @@ def clone_target_repo() -> str:
         return _cloned_repo_dir
 
     tmp = tempfile.mkdtemp(prefix="codecull-target-")
-    logger.info("Cloning %s into %s", repo_url, tmp)
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    logger.info("Cloning %s into %s", repo_slug, tmp)
     result = subprocess.run(
         ["git", "clone", repo_url, tmp],
         capture_output=True,
@@ -242,7 +254,7 @@ def clone_target_repo() -> str:
     )
     if result.returncode != 0:
         shutil.rmtree(tmp, ignore_errors=True)
-        raise RuntimeError(f"Failed to clone {repo_url}: {result.stderr.strip()}")
+        raise RuntimeError(f"Failed to clone {repo_slug}: {result.stderr.strip()}")
 
     _cloned_repo_dir = tmp
     return tmp

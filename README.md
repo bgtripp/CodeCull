@@ -40,6 +40,7 @@ python main.py
 | `DEVIN_API_KEY` | Devin API key (required for cleanup sessions) |
 | `DEVIN_ORG_ID` | Devin org ID (required for `cog_` service-user keys) |
 | `SLACK_BOT_TOKEN` | Slack bot token with `users:read.email` + `chat:write` |
+| `GITHUB_TOKEN` | GitHub PAT with Contents:Read-only (required for private repos) |
 | `TARGET_REPO` | GitHub repo in `owner/repo` format (default: `bgtripp/LogiOps`) |
 | `TARGET_REPO_PATH` | Optional local path to the target repo (skips git clone) |
 | `MOCK_LD_DATA_PATH` | Path to mock LaunchDarkly JSON file |
