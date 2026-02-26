@@ -3,25 +3,21 @@
 {% block title %}CodeCull &mdash; Dashboard{% endblock %}
 
 {% block content %}
+{% set visible = candidates|selectattr('status', 'ne', 'skipped')|list %}
+
 <div class="toolbar">
     <div class="toolbar-left">
-        <form method="post" action="/scan">
-            <button type="submit" class="btn btn-scan">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                Scan
-            </button>
-        </form>
+        <span class="toolbar-title">Cleanup queue</span>
         {% if last_scan_time %}
-        <span class="last-scan">{{ last_scan_time.strftime('%b %d, %Y %H:%M UTC') }}</span>
+        <span class="last-scan">Last scan {{ last_scan_time.strftime('%b %d, %Y %H:%M UTC') }}</span>
         {% endif %}
     </div>
-    <span class="candidate-count">{{ candidates|selectattr('status', 'ne', 'skipped')|list|length }} candidate{{ 's' if candidates|selectattr('status', 'ne', 'skipped')|list|length != 1 }}</span>
+    <span class="candidate-count">{{ visible|length }} PR{{ 's' if visible|length != 1 }} ready for review</span>
 </div>
 
-{% set visible = candidates|selectattr('status', 'ne', 'skipped')|list %}
 {% if not visible %}
 <div class="empty-state">
-    <p>No stale flags found. Run a scan or check your configuration.</p>
+    <p>No stale flags found. All clean!</p>
 </div>
 {% endif %}
 
@@ -35,14 +31,12 @@
                 <span class="badge badge--age">{{ c.days_stale }} days stale</span>
             </div>
             <div class="card-status">
-                {% if c.status == "pending" %}
-                    <span class="status-dot status-dot--pending"></span> Pending
+                {% if c.status == "done" %}
+                    <span class="status-dot status-dot--done"></span> PR Ready
                 {% elif c.status == "in_progress" %}
                     <span class="status-dot status-dot--progress"></span> Devin working&hellip;
-                {% elif c.status == "done" %}
+                {% elif c.status == "pending" %}
                     <span class="status-dot status-dot--done"></span> PR Ready
-                {% elif c.status == "skipped" %}
-                    <span class="status-dot status-dot--skipped"></span> Skipped
                 {% elif c.status == "error" %}
                     <span class="status-dot status-dot--error"></span> Error
                 {% endif %}
@@ -71,6 +65,38 @@
             {% endif %}
         </div>
 
+        {% if previews.get(c.flag_key) %}
+        {% set preview = previews[c.flag_key] %}
+        <details class="diff-details" open>
+            <summary>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+                Dead code preview
+                <span class="diff-stat">
+                    <span class="diff-stat-remove">&minus;{{ preview.total_dead_lines }} lines</span>
+                    across {{ preview.total_files }} file{{ 's' if preview.total_files != 1 }}
+                </span>
+            </summary>
+            <div class="diff-container">
+            {% for fp in preview.file_previews %}
+                <div class="diff-file">
+                    <div class="diff-file-header">{{ fp.file_path }}</div>
+                    {% for block in fp.blocks %}
+                    <div class="diff-block">
+                        {% for dl in block.diff_lines %}
+                        <div class="diff-line diff-line--{{ dl.kind }}">
+                            <span class="diff-lineno">{{ dl.line_number }}</span>
+                            <span class="diff-marker">{% if dl.kind == 'remove' %}-{% elif dl.kind == 'keep' %}+{% else %} {% endif %}</span>
+                            <span class="diff-text">{{ dl.text }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endfor %}
+                </div>
+            {% endfor %}
+            </div>
+        </details>
+        {% endif %}
+
         <details class="file-details">
             <summary>Affected files</summary>
             <ul>
@@ -80,57 +106,34 @@
             </ul>
         </details>
 
-        <details class="file-details">
-            <summary>Code references</summary>
-            <table class="ref-table">
-                <thead>
-                    <tr><th>File</th><th>Line</th><th>Code</th></tr>
-                </thead>
-                <tbody>
-                {% for occ in c.occurrences %}
-                    <tr>
-                        <td><code>{{ occ.file_path }}</code></td>
-                        <td>{{ occ.line_number }}</td>
-                        <td><code>{{ occ.line_text }}</code></td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </details>
-
         {% if sessions.get(c.flag_key) %}
         <div class="session-info">
             {% set s = sessions[c.flag_key] %}
             <p>
                 <strong>Devin session:</strong>
                 <a href="{{ s.url }}" target="_blank">{{ s.session_id[:12] }}&hellip;</a>
-                &mdash; {{ s.status }}
             </p>
-            {% if s.pr_url %}
-            <p>
-                <strong>Pull request:</strong>
-                <a href="{{ s.pr_url }}" target="_blank">{{ s.pr_url }}</a>
-            </p>
-            {% endif %}
         </div>
         {% endif %}
 
         <div class="card-actions">
-            {% if c.status == "pending" %}
-            <form method="post" action="/approve/{{ c.flag_key }}">
-                <button type="submit" class="btn btn-approve">Approve Cleanup</button>
-            </form>
+            {% set s = sessions.get(c.flag_key, {}) %}
+            {% if s.pr_url %}
+            <a href="{{ s.pr_url }}" class="btn btn-primary" target="_blank">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                Review PR
+            </a>
+            {% elif c.status == "in_progress" %}
+            <button class="btn btn-disabled" disabled>Devin is working&hellip;</button>
+            {% else %}
+            <a href="#" class="btn btn-primary btn-placeholder" onclick="return false">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                Review PR
+            </a>
+            {% endif %}
             <form method="post" action="/skip/{{ c.flag_key }}">
                 <button type="submit" class="btn btn-skip">Skip for now</button>
             </form>
-            {% elif c.status == "in_progress" %}
-            <button class="btn btn-disabled" disabled>Devin is working&hellip;</button>
-            {% elif c.status == "done" %}
-            {% set s = sessions.get(c.flag_key, {}) %}
-            {% if s.pr_url %}
-            <a href="{{ s.pr_url }}" class="btn btn-approve" target="_blank">View PR</a>
-            {% endif %}
-            {% endif %}
         </div>
     </div>
 {% endfor %}

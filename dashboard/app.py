@@ -1,8 +1,10 @@
 """
 CodeCull Dashboard — FastAPI + Jinja2 web UI.
 
-Shows ranked cleanup candidates with approve / skip buttons.  On approval the
-Devin API is called to spin up a cleanup session.
+Displays a review queue of stale feature-flag cleanup PRs.  The scanner runs
+automatically (on startup / cron) and Devin creates draft PRs in advance.
+Engineers open the dashboard, review the dead-code preview, and click through
+to the PR — or skip for now.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from scanner.devin_integration import (
     extract_pr_url,
     poll_session_until_done,
 )
+from scanner.dead_code_analyzer import CleanupPreview, generate_cleanup_preview
 from scanner.flag_scanner import FlagCandidate, get_target_repo_path, run_scan
 from scanner.slack_notify import notify_flag_author
 
@@ -40,6 +43,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # ---------------------------------------------------------------------------
 _candidates: list[FlagCandidate] = []
 _sessions: dict[str, dict] = {}  # flag_key -> {session_id, url, status, pr_url}
+_previews: dict[str, CleanupPreview] = {}  # flag_key -> dead-code preview
 _last_scan_time: datetime | None = None
 
 
@@ -50,10 +54,11 @@ _last_scan_time: datetime | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run the scanner once at startup to populate candidates."""
-    global _candidates, _last_scan_time
+    global _candidates, _previews, _last_scan_time
     logger.info("Running initial scan...")
     _candidates = run_scan()
     _last_scan_time = datetime.now(timezone.utc)
+    _previews = _generate_previews(_candidates)
     logger.info("Found %d stale flag candidates", len(_candidates))
     yield
 
@@ -82,18 +87,10 @@ async def index(request: Request):
             "request": request,
             "candidates": _candidates,
             "sessions": _sessions,
+            "previews": _previews,
             "last_scan_time": _last_scan_time,
         },
     )
-
-
-@app.post("/scan")
-async def rescan():
-    """Re-run the scanner and redirect back to the dashboard."""
-    global _candidates, _last_scan_time
-    _candidates = run_scan()
-    _last_scan_time = datetime.now(timezone.utc)
-    return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/approve/{flag_key}")
@@ -153,6 +150,30 @@ async def flag_status(flag_key: str):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _generate_previews(candidates: list[FlagCandidate]) -> dict[str, CleanupPreview]:
+    """Generate dead-code previews for all candidates."""
+    previews: dict[str, CleanupPreview] = {}
+    try:
+        repo_path = get_target_repo_path()
+    except Exception:
+        logger.exception("Cannot generate previews — target repo unavailable")
+        return previews
+
+    for c in candidates:
+        try:
+            preview = generate_cleanup_preview(
+                repo_path=repo_path,
+                flag_key=c.flag_key,
+                variation=c.variation_served,
+                affected_files=c.files_affected,
+            )
+            if preview.total_dead_lines > 0:
+                previews[c.flag_key] = preview
+        except Exception:
+            logger.exception("Failed to generate preview for %s", c.flag_key)
+    return previews
+
 
 def _find_candidate(flag_key: str) -> FlagCandidate | None:
     for c in _candidates:
