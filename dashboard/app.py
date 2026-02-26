@@ -236,7 +236,7 @@ async def login_page(request: Request):
 
 
 @app.post("/auth/login")
-async def login_submit(request: Request, email: str = Form(...)):
+def login_submit(request: Request, email: str = Form(...)):
     """Validate email, generate OTP, send it, redirect to verify page."""
     email = email.strip().lower()
 
@@ -264,7 +264,7 @@ async def login_submit(request: Request, email: str = Form(...)):
 
 
 @app.post("/auth/verify")
-async def verify_submit(request: Request, email: str = Form(...), code: str = Form(...)):
+def verify_submit(request: Request, email: str = Form(...), code: str = Form(...)):
     """Verify OTP code and set session cookie."""
     email = email.strip().lower()
 
@@ -304,7 +304,7 @@ async def logout():
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+def index(request: Request):
     """Main dashboard page.
 
     On every load we re-check each PR's status on GitHub.  Merged or
