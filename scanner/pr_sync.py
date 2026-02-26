@@ -222,17 +222,6 @@ def _send_slack_ready_notification(
 
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": text}},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Open Dashboard"},
-                    "url": dashboard_url,
-                    "style": "primary",
-                }
-            ],
-        },
     ]
 
     send_dm(slack_user_id, text, blocks)
