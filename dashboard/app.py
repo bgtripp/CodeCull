@@ -82,6 +82,15 @@ async def lifespan(app: FastAPI):
 
     _apply_state_to_candidates(_candidates)
 
+    # Sort: most lines removed first, then most stale
+    _candidates.sort(
+        key=lambda c: (
+            _pr_stats.get(c.flag_key, {}).get("deletions", 0),
+            c.days_stale,
+        ),
+        reverse=True,
+    )
+
     logger.info(
         "Loaded %d candidates, %d sessions, %d PR stats",
         len(_candidates),
