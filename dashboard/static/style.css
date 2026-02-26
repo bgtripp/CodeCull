@@ -118,10 +118,14 @@ header {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
-    background: var(--accent);
-    color: #fff;
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
 }
-.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:hover {
+    background: var(--surface-hover);
+    border-color: var(--text-muted);
+}
 .btn-primary svg { flex-shrink: 0; }
 
 .btn-placeholder {

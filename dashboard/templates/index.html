@@ -106,9 +106,6 @@
             {% elif c.status == "done" %}
             <span class="btn btn-disabled">PR link pending&hellip;</span>
             {% endif %}
-            <form method="post" action="/skip/{{ c.flag_key }}">
-                <button type="submit" class="btn btn-skip">Skip for now</button>
-            </form>
         </div>
     </div>
 {% endfor %}
