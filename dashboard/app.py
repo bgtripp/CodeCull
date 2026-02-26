@@ -22,7 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from scanner.flag_scanner import FlagCandidate, run_scan
-from scanner.state_store import load_state
+from scanner.github_stats import fetch_pr_stats
+from scanner.state_store import load_state, save_state
 
 # Use explicit path so .env is found regardless of CWD / uvicorn reloader.
 # override=True ensures stale shell env vars don't shadow the .env values.
@@ -118,7 +119,14 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    """Main dashboard page."""
+    """Main dashboard page.
+
+    On every load we re-check each PR's status on GitHub.  Merged or
+    closed PRs are automatically removed from the queue so the engineer
+    never has to manually dismiss them.
+    """
+    _refresh_pr_statuses()
+
     return templates.TemplateResponse(
         "index.html",
         {
@@ -156,6 +164,41 @@ async def flag_status(flag_key: str):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _refresh_pr_statuses() -> None:
+    """Check GitHub for merged/closed PRs and drop them from the queue."""
+    global _candidates, _sessions, _pr_stats
+
+    keys_to_remove: list[str] = []
+
+    for flag_key, session in list(_sessions.items()):
+        pr_url = session.get("pr_url")
+        if not pr_url:
+            continue
+
+        stats = fetch_pr_stats(pr_url)
+        if stats is None:
+            continue
+
+        # Update cached stats while we're at it
+        _pr_stats[flag_key] = stats
+
+        if stats.get("merged") or stats.get("state") == "closed":
+            logger.info("PR for %s is %s — removing from queue", flag_key,
+                        "merged" if stats.get("merged") else "closed")
+            keys_to_remove.append(flag_key)
+
+    if keys_to_remove:
+        for key in keys_to_remove:
+            _sessions.pop(key, None)
+            _pr_stats.pop(key, None)
+
+        _candidates = [c for c in _candidates if c.flag_key not in keys_to_remove]
+
+        # Persist the updated state so restarts also reflect the removal
+        save_state(_STATE_PATH, _sessions, _pr_stats)
+        logger.info("Removed %d merged/closed PR(s) from queue", len(keys_to_remove))
+
 
 def _find_candidate(flag_key: str) -> FlagCandidate | None:
     for c in _candidates:
