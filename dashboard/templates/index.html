@@ -4,25 +4,29 @@
 
 {% block content %}
 <div class="toolbar">
-    <h2>Cleanup Candidates</h2>
-    <div class="toolbar-right">
-        {% if last_scan_time %}
-        <span class="last-scan">Last scan: {{ last_scan_time.strftime('%b %d, %Y %H:%M UTC') }}</span>
-        {% endif %}
+    <div class="toolbar-left">
         <form method="post" action="/scan">
-            <button type="submit" class="btn btn-secondary">Scan</button>
+            <button type="submit" class="btn btn-scan">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                Scan
+            </button>
         </form>
+        {% if last_scan_time %}
+        <span class="last-scan">{{ last_scan_time.strftime('%b %d, %Y %H:%M UTC') }}</span>
+        {% endif %}
     </div>
+    <span class="candidate-count">{{ candidates|selectattr('status', 'ne', 'skipped')|list|length }} candidate{{ 's' if candidates|selectattr('status', 'ne', 'skipped')|list|length != 1 }}</span>
 </div>
 
-{% if not candidates %}
+{% set visible = candidates|selectattr('status', 'ne', 'skipped')|list %}
+{% if not visible %}
 <div class="empty-state">
     <p>No stale flags found. Run a scan or check your configuration.</p>
 </div>
 {% endif %}
 
 <div class="card-list">
-{% for c in candidates %}
+{% for c in visible %}
     <div class="card card--{{ c.status }}">
         <div class="card-header">
             <div class="flag-info">
@@ -117,7 +121,7 @@
                 <button type="submit" class="btn btn-approve">Approve Cleanup</button>
             </form>
             <form method="post" action="/skip/{{ c.flag_key }}">
-                <button type="submit" class="btn btn-skip">Skip</button>
+                <button type="submit" class="btn btn-skip">Skip for now</button>
             </form>
             {% elif c.status == "in_progress" %}
             <button class="btn btn-disabled" disabled>Devin is working&hellip;</button>
