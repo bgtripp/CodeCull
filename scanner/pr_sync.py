@@ -57,44 +57,65 @@ def sync_state(state_path: Path | None = None) -> dict:
 
     logger.info("Found %d stale flag candidate(s)", len(candidates))
 
-    # 2. Check for existing state (avoid re-dispatching)
+    # 2. Load existing persisted state + check GitHub for existing PRs
     existing_state = load_state(state_path)
     existing_sessions = existing_state.get("sessions", {})
 
-    # 3. Dispatch Devin sessions for flags that don't already have a PR
     sessions: dict[str, dict] = {}
-    need_polling: list[str] = []
+    flag_keys = [c.flag_key for c in candidates]
 
+    # Merge PRs we already know about from the state file
     for c in candidates:
         existing = existing_sessions.get(c.flag_key, {})
         if existing.get("pr_url"):
-            logger.info("Flag %s already has a PR: %s — skipping dispatch", c.flag_key, existing["pr_url"])
             sessions[c.flag_key] = existing
-            continue
 
-        logger.info("Step 2/5: Dispatching Devin session for %s...", c.flag_key)
+    # 3. Discover any existing PRs on GitHub (avoids dispatching Devin
+    #    when cleanup PRs have already been created by a previous run)
+    missing_keys = [k for k in flag_keys if not sessions.get(k, {}).get("pr_url")]
+    if missing_keys:
+        logger.info("Step 2/5: Checking GitHub for existing cleanup PRs...")
         try:
-            result = create_cleanup_session(
-                flag_key=c.flag_key,
-                repo=repo_slug,
-                variation=c.variation_served,
-                files=c.files_affected,
-            )
-            sessions[c.flag_key] = {
-                "session_id": result["session_id"],
-                "url": result["url"],
-                "status": "running",
-                "pr_url": None,
-            }
-            need_polling.append(c.flag_key)
-            logger.info("  -> Session %s created: %s", result["session_id"], result["url"])
+            discovered = discover_cleanup_prs(repo_slug, missing_keys)
+            for flag_key, info in discovered.items():
+                pr_url = info.get("pr_url")
+                if pr_url:
+                    sessions[flag_key] = {"status": "ready", "pr_url": pr_url}
+                    logger.info("  -> %s: found existing PR: %s", flag_key, pr_url)
         except Exception:
-            logger.exception("Failed to dispatch Devin for %s", c.flag_key)
-            sessions[c.flag_key] = {"status": "error", "pr_url": None}
+            logger.exception("GitHub PR discovery failed")
 
-    # 4. Poll Devin sessions until they complete
+    # 4. Dispatch Devin sessions for flags that still don't have a PR
+    need_polling: list[str] = []
+    still_missing = [c for c in candidates if not sessions.get(c.flag_key, {}).get("pr_url")]
+
+    if still_missing:
+        logger.info("Step 3/5: Dispatching Devin for %d flag(s) without PRs...", len(still_missing))
+        for c in still_missing:
+            try:
+                result = create_cleanup_session(
+                    flag_key=c.flag_key,
+                    repo=repo_slug,
+                    variation=c.variation_served,
+                    files=c.files_affected,
+                )
+                sessions[c.flag_key] = {
+                    "session_id": result["session_id"],
+                    "url": result["url"],
+                    "status": "running",
+                    "pr_url": None,
+                }
+                need_polling.append(c.flag_key)
+                logger.info("  -> Session %s created: %s", result["session_id"], result["url"])
+            except Exception:
+                logger.exception("Failed to dispatch Devin for %s", c.flag_key)
+                sessions[c.flag_key] = {"status": "error", "pr_url": None}
+    else:
+        logger.info("Step 3/5: All flags already have PRs — skipping Devin dispatch")
+
+    # 5. Poll newly-created Devin sessions until they complete
     if need_polling:
-        logger.info("Step 3/5: Polling %d Devin session(s)...", len(need_polling))
+        logger.info("Step 4/5: Polling %d Devin session(s)...", len(need_polling))
         for flag_key in need_polling:
             sid = sessions[flag_key].get("session_id")
             if not sid:
@@ -111,29 +132,6 @@ def sync_state(state_path: Path | None = None) -> dict:
             except Exception:
                 logger.exception("Failed to poll session for %s", flag_key)
                 sessions[flag_key]["status"] = "error"
-
-    # 5. Fallback: discover PRs via GitHub API for flags still missing a PR URL
-    flag_keys_missing_pr = [
-        c.flag_key for c in candidates
-        if not sessions.get(c.flag_key, {}).get("pr_url")
-    ]
-    if flag_keys_missing_pr:
-        logger.info(
-            "Step 4/5: Discovering PRs via GitHub API for %d flag(s)...",
-            len(flag_keys_missing_pr),
-        )
-        try:
-            discovered = discover_cleanup_prs(repo_slug, flag_keys_missing_pr)
-            for flag_key, info in discovered.items():
-                pr_url = info.get("pr_url")
-                if pr_url:
-                    if flag_key not in sessions:
-                        sessions[flag_key] = {}
-                    sessions[flag_key]["pr_url"] = pr_url
-                    sessions[flag_key]["status"] = "ready"
-                    logger.info("  -> %s: discovered PR: %s", flag_key, pr_url)
-        except Exception:
-            logger.exception("GitHub PR discovery failed (PAT may need Pull requests:Read permission)")
 
     # 6. Fetch PR stats for all flags with PR URLs
     logger.info("Step 5/5: Fetching PR stats...")
