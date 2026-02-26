@@ -24,8 +24,8 @@ def _api_base() -> str:
     """Return the correct API base URL based on the key type.
 
     For ``cog_`` service-user keys the v3 org-scoped endpoint is used.
-    The org ID can be supplied via ``DEVIN_ORG_ID``; if omitted, the API
-    resolves it automatically from the credential.
+    The org ID must be supplied via ``DEVIN_ORG_ID``; a ``RuntimeError`` is
+    raised if it is missing for ``cog_`` keys.
     """
     token = os.getenv("DEVIN_API_KEY", "")
     if token.startswith("cog_"):

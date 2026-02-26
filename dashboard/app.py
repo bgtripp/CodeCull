@@ -27,7 +27,10 @@ from scanner.devin_integration import (
 from scanner.flag_scanner import FlagCandidate, get_target_repo_path, run_scan
 from scanner.slack_notify import notify_flag_author
 
-load_dotenv()
+# Use explicit path so .env is found regardless of CWD / uvicorn reloader.
+# override=True ensures stale shell env vars don't shadow the .env values.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
