@@ -208,13 +208,25 @@ def analyse_flags(
 _cloned_repo_dir: str | None = None
 
 
-def _build_repo_url() -> str:
-    """Build the clone URL, embedding a GITHUB_TOKEN if available."""
+def _build_repo_url() -> tuple[str, str]:
+    """Build the clone URL, returning ``(url, token)``.
+
+    If ``GITHUB_TOKEN`` is set the token is embedded in the URL for
+    authentication.  The token is also returned so callers can sanitize
+    log / error messages.
+    """
     repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
     token = os.getenv("GITHUB_TOKEN", "")
     if token:
-        return f"https://x-access-token:{token}@github.com/{repo_slug}.git"
-    return f"https://github.com/{repo_slug}.git"
+        return f"https://x-access-token:{token}@github.com/{repo_slug}.git", token
+    return f"https://github.com/{repo_slug}.git", ""
+
+
+def _sanitize(text: str, token: str) -> str:
+    """Replace *token* in *text* with ``***`` to avoid leaking credentials."""
+    if token:
+        return text.replace(token, "***")
+    return text
 
 
 def clone_target_repo() -> str:
@@ -228,7 +240,7 @@ def clone_target_repo() -> str:
     """
     global _cloned_repo_dir
 
-    repo_url = _build_repo_url()
+    repo_url, token = _build_repo_url()
 
     if _cloned_repo_dir and Path(_cloned_repo_dir).exists():
         logger.info("Pulling latest changes in cached clone %s", _cloned_repo_dir)
@@ -240,7 +252,7 @@ def clone_target_repo() -> str:
             timeout=60,
         )
         if result.returncode != 0:
-            logger.warning("git pull failed (rc=%d): %s", result.returncode, result.stderr.strip())
+            logger.warning("git pull failed (rc=%d): %s", result.returncode, _sanitize(result.stderr.strip(), token))
         return _cloned_repo_dir
 
     tmp = tempfile.mkdtemp(prefix="codecull-target-")
@@ -254,7 +266,7 @@ def clone_target_repo() -> str:
     )
     if result.returncode != 0:
         shutil.rmtree(tmp, ignore_errors=True)
-        raise RuntimeError(f"Failed to clone {repo_slug}: {result.stderr.strip()}")
+        raise RuntimeError(f"Failed to clone {repo_slug}: {_sanitize(result.stderr.strip(), token)}")
 
     _cloned_repo_dir = tmp
     return tmp
