@@ -122,7 +122,11 @@ def load_ld_flags(ld_data_path: str) -> dict:
 
 
 def _unleash_basic_auth() -> tuple[str, str] | None:
-    """Return (username, password) for HTTP Basic Auth if configured."""
+    """Return (username, password) for HTTP Basic Auth if configured.
+
+    Credentials MUST be provided via environment variables — no defaults
+    are compiled into the source.
+    """
     user = os.getenv("UNLEASH_ADMIN_USER", "")
     password = os.getenv("UNLEASH_ADMIN_PASSWORD", "")
     if user and password:
