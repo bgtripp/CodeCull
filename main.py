@@ -12,6 +12,13 @@ Usage:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from project root before anything else.
+# override=True ensures stale shell env vars don't shadow the .env values.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 
 def _run_dashboard() -> None:

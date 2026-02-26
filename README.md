@@ -11,9 +11,10 @@ Scanner  ──▶  Dashboard  ──▶  Devin API  ──▶  Draft PR  ──
 ```
 
 1. **Scanner** walks the repo looking for `is_enabled("flag-key")` calls and cross-references a LaunchDarkly mock to find flags that have been always-on or always-off for 90+ days.
-2. **Dashboard** (FastAPI + Jinja2) shows the ranked candidates with context — flag name, age, files affected, code references — and Approve / Skip buttons.
-3. **Devin integration** — on approval, a Devin session is created via the API. Devin removes the flag, cleans up dead code paths, updates tests, and opens a draft PR.
-4. **Slack notification** — `git blame` identifies who introduced the flag. Their Slack user is resolved via `users.lookupByEmail` and they receive a DM with the PR link.
+2. **Scheduled scan** — a GitHub Actions cron job runs the scanner daily at 08:00 UTC and opens a GitHub Issue summarizing any stale flags found.
+3. **Dashboard** (FastAPI + Jinja2) shows the ranked candidates with context — flag name, age, files affected, code references — and Approve / Skip buttons.
+4. **Devin integration** — on approval, a Devin session is created via the API. Devin removes the flag, cleans up dead code paths, updates tests, and opens a draft PR.
+5. **Slack notification** — `git blame` identifies who introduced the flag. Their Slack user is resolved via `users.lookupByEmail` and they receive a DM with the PR link.
 
 ## Quick start
 
@@ -37,14 +38,16 @@ python main.py
 | Variable | Description |
 |---|---|
 | `DEVIN_API_KEY` | Devin API key (required for cleanup sessions) |
+| `DEVIN_ORG_ID` | Devin org ID (required for `cog_` service-user keys) |
 | `SLACK_BOT_TOKEN` | Slack bot token with `users:read.email` + `chat:write` |
-| `TARGET_REPO` | GitHub repo in `owner/repo` format |
-| `TARGET_REPO_PATH` | Path to local clone of the target repo |
+| `GITHUB_TOKEN` | GitHub PAT with Contents:Read-only (required for private repos) |
+| `TARGET_REPO` | GitHub repo in `owner/repo` format (default: `bgtripp/LogiOps`) |
+| `TARGET_REPO_PATH` | Optional local path to the target repo (skips git clone) |
 | `MOCK_LD_DATA_PATH` | Path to mock LaunchDarkly JSON file |
 
-## Demo repo
+## Target repo
 
-The `demo_service/` directory is a realistic Python service seeded with 5 feature flags:
+CodeCull scans an external repo — [`bgtripp/LogiOps`](https://github.com/bgtripp/LogiOps) — a demo Python service seeded with 5 feature flags:
 
 | Flag | Status | Candidate? |
 |---|---|---|
@@ -54,23 +57,18 @@ The `demo_service/` directory is a realistic Python service seeded with 5 featur
 | `rollout-search-suggestions` | 50% rollout (active) | No |
 | `enable-dark-mode` | ON for 10 days (too recent) | No |
 
+On startup the scanner clones `TARGET_REPO` automatically. Set `TARGET_REPO_PATH` to point at a local checkout instead.
+
 ## Project structure
 
 ```
 CodeCull/
 ├── main.py                  # Entry point (dashboard or CLI scan)
 ├── mock_launchdarkly.json   # Mock LD flag data
-├── demo_service/            # Demo Python service with feature flags
-│   ├── feature_flags.py     # Flag client
-│   ├── checkout.py          # Uses enable-new-checkout-flow
-│   ├── dashboard_ui.py      # Uses show-redesigned-dashboard
-│   ├── pricing.py           # Uses use-v2-pricing-engine
-│   ├── search.py            # Uses rollout-search-suggestions
-│   ├── settings.py          # Uses enable-dark-mode
-│   ├── config.py            # Flag key constants
-│   └── tests/               # Unit tests
+├── .github/workflows/
+│   └── scan.yml             # Daily cron — scans & opens GitHub Issue
 ├── scanner/
-│   ├── flag_scanner.py      # Code scanner + staleness analysis
+│   ├── flag_scanner.py      # Code scanner + staleness analysis + repo cloning
 │   ├── devin_integration.py # Devin API session management
 │   └── slack_notify.py      # Slack DM notifications
 └── dashboard/

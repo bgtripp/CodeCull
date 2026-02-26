@@ -2,7 +2,8 @@
 Devin API integration — creates a Devin session to remove a stale feature
 flag and open a draft PR.
 
-Uses the v1 session API: POST https://api.devin.ai/v1/sessions
+Supports both v1 (personal API keys) and v3 (service user keys starting with
+``cog_``) endpoints.
 """
 
 from __future__ import annotations
@@ -15,7 +16,28 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-DEVIN_API_BASE = "https://api.devin.ai/v1"
+DEVIN_API_V1 = "https://api.devin.ai/v1"
+DEVIN_API_V3_BASE = "https://api.devin.ai/v3/organizations"
+
+
+def _api_base() -> str:
+    """Return the correct API base URL based on the key type.
+
+    For ``cog_`` service-user keys the v3 org-scoped endpoint is used.
+    The org ID must be supplied via ``DEVIN_ORG_ID``; a ``RuntimeError`` is
+    raised if it is missing for ``cog_`` keys.
+    """
+    token = os.getenv("DEVIN_API_KEY", "")
+    if token.startswith("cog_"):
+        org_id = os.getenv("DEVIN_ORG_ID", "")
+        if org_id:
+            return f"{DEVIN_API_V3_BASE}/{org_id}"
+        raise RuntimeError(
+            "DEVIN_ORG_ID environment variable is required for cog_ service-user keys"
+        )
+    return DEVIN_API_V1
+
+
 POLL_INTERVAL_SECONDS = 15
 MAX_POLL_MINUTES = 30
 
@@ -80,7 +102,7 @@ def create_cleanup_session(
     }
 
     resp = httpx.post(
-        f"{DEVIN_API_BASE}/sessions",
+        f"{_api_base()}/sessions",
         headers=_headers(),
         json=payload,
         timeout=30,
@@ -98,7 +120,7 @@ def create_cleanup_session(
 def get_session_status(session_id: str) -> dict:
     """Retrieve the current status of a Devin session."""
     resp = httpx.get(
-        f"{DEVIN_API_BASE}/sessions/{session_id}",
+        f"{_api_base()}/sessions/{session_id}",
         headers=_headers(),
         timeout=30,
     )

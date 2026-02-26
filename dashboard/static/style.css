@@ -82,6 +82,18 @@ header {
     font-weight: 600;
 }
 
+.toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.last-scan {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
 /* ---- Buttons ---- */
 
 .btn {

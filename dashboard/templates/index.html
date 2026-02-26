@@ -5,9 +5,14 @@
 {% block content %}
 <div class="toolbar">
     <h2>Cleanup Candidates</h2>
-    <form method="post" action="/scan">
-        <button type="submit" class="btn btn-secondary">Re-scan</button>
-    </form>
+    <div class="toolbar-right">
+        {% if last_scan_time %}
+        <span class="last-scan">Last scan: {{ last_scan_time.strftime('%b %d, %Y %H:%M UTC') }}</span>
+        {% endif %}
+        <form method="post" action="/scan">
+            <button type="submit" class="btn btn-secondary">Scan</button>
+        </form>
+    </div>
 </div>
 
 {% if not candidates %}

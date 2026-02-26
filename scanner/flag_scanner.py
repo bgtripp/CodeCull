@@ -11,11 +11,17 @@ A flag is considered *stale* when:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -195,12 +201,95 @@ def analyse_flags(
 # Convenience entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Repo cloning helper
+# ---------------------------------------------------------------------------
+
+_cloned_repo_dir: str | None = None
+
+
+def _build_repo_url() -> tuple[str, str]:
+    """Build the clone URL, returning ``(url, token)``.
+
+    If ``GITHUB_TOKEN`` is set the token is embedded in the URL for
+    authentication.  The token is also returned so callers can sanitize
+    log / error messages.
+    """
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    token = os.getenv("GITHUB_TOKEN", "")
+    if token:
+        return f"https://x-access-token:{token}@github.com/{repo_slug}.git", token
+    return f"https://github.com/{repo_slug}.git", ""
+
+
+def _sanitize(text: str, token: str) -> str:
+    """Replace *token* in *text* with ``***`` to avoid leaking credentials."""
+    if token:
+        return text.replace(token, "***")
+    return text
+
+
+def clone_target_repo() -> str:
+    """Clone the target GitHub repo into a temp directory and return its path.
+
+    The clone is cached for the lifetime of the process so repeated scans
+    do ``git pull`` instead of a full clone.
+
+    If ``GITHUB_TOKEN`` is set, it is used to authenticate the clone
+    (required for private repos).
+    """
+    global _cloned_repo_dir
+
+    repo_url, token = _build_repo_url()
+
+    if _cloned_repo_dir and Path(_cloned_repo_dir).exists():
+        logger.info("Pulling latest changes in cached clone %s", _cloned_repo_dir)
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=_cloned_repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning("git pull failed (rc=%d): %s", result.returncode, _sanitize(result.stderr.strip(), token))
+        return _cloned_repo_dir
+
+    tmp = tempfile.mkdtemp(prefix="codecull-target-")
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    logger.info("Cloning %s into %s", repo_slug, tmp)
+    result = subprocess.run(
+        ["git", "clone", repo_url, tmp],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(f"Failed to clone {repo_slug}: {_sanitize(result.stderr.strip(), token)}")
+
+    _cloned_repo_dir = tmp
+    return tmp
+
+
+def get_target_repo_path() -> str:
+    """Return the local path to the target repo.
+
+    If ``TARGET_REPO_PATH`` is set, use it directly (local development).
+    Otherwise clone ``TARGET_REPO`` from GitHub.
+    """
+    explicit = os.getenv("TARGET_REPO_PATH")
+    if explicit:
+        return explicit
+    return clone_target_repo()
+
+
 def run_scan(
     repo_path: str | None = None,
     ld_data_path: str | None = None,
 ) -> list[FlagCandidate]:
     """Run a full scan and return stale flag candidates."""
-    repo_path = repo_path or os.getenv("TARGET_REPO_PATH", "./demo_service")
+    repo_path = repo_path or get_target_repo_path()
     ld_data_path = ld_data_path or os.getenv("MOCK_LD_DATA_PATH", "./mock_launchdarkly.json")
 
     code_flags = scan_codebase(repo_path)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -23,10 +24,13 @@ from scanner.devin_integration import (
     extract_pr_url,
     poll_session_until_done,
 )
-from scanner.flag_scanner import FlagCandidate, run_scan
+from scanner.flag_scanner import FlagCandidate, get_target_repo_path, run_scan
 from scanner.slack_notify import notify_flag_author
 
-load_dotenv()
+# Use explicit path so .env is found regardless of CWD / uvicorn reloader.
+# override=True ensures stale shell env vars don't shadow the .env values.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -36,6 +40,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # ---------------------------------------------------------------------------
 _candidates: list[FlagCandidate] = []
 _sessions: dict[str, dict] = {}  # flag_key -> {session_id, url, status, pr_url}
+_last_scan_time: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -45,9 +50,10 @@ _sessions: dict[str, dict] = {}  # flag_key -> {session_id, url, status, pr_url}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run the scanner once at startup to populate candidates."""
-    global _candidates
+    global _candidates, _last_scan_time
     logger.info("Running initial scan...")
     _candidates = run_scan()
+    _last_scan_time = datetime.now(timezone.utc)
     logger.info("Found %d stale flag candidates", len(_candidates))
     yield
 
@@ -76,6 +82,7 @@ async def index(request: Request):
             "request": request,
             "candidates": _candidates,
             "sessions": _sessions,
+            "last_scan_time": _last_scan_time,
         },
     )
 
@@ -83,8 +90,9 @@ async def index(request: Request):
 @app.post("/scan")
 async def rescan():
     """Re-run the scanner and redirect back to the dashboard."""
-    global _candidates
+    global _candidates, _last_scan_time
     _candidates = run_scan()
+    _last_scan_time = datetime.now(timezone.utc)
     return RedirectResponse(url="/", status_code=303)
 
 
@@ -97,7 +105,7 @@ async def approve_flag(flag_key: str, background_tasks: BackgroundTasks):
 
     candidate.status = "in_progress"
 
-    target_repo = os.getenv("TARGET_REPO", "bgtripp/CodeCull")
+    target_repo = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
 
     try:
         result = create_cleanup_session(
@@ -174,7 +182,7 @@ def _poll_and_notify(flag_key: str, candidate: FlagCandidate) -> None:
         candidate.status = "done"
 
         # Send Slack DM to the flag author
-        repo_path = os.getenv("TARGET_REPO_PATH", "./demo_service")
+        repo_path = get_target_repo_path()
         first_file = candidate.files_affected[0] if candidate.files_affected else ""
 
         try:
