@@ -46,34 +46,14 @@
 
         <p class="flag-desc">{{ c.description }}</p>
 
-        <div class="meta-row">
-            <div class="meta-item">
-                <strong>Name:</strong> {{ c.flag_name }}
-            </div>
-            {% set stats = pr_stats.get(c.flag_key) %}
-            {% if stats %}
-            <div class="meta-item pr-impact">
-                <strong>Impact:</strong>
-                <span class="pr-deletions">&minus;{{ stats.deletions }} lines</span>
-                across {{ stats.files_changed }} file{{ 's' if stats.files_changed != 1 }}
-            </div>
-            {% else %}
-            <div class="meta-item">
-                <strong>Files:</strong> {{ c.files_affected | length }}
-            </div>
-            <div class="meta-item">
-                <strong>References:</strong> {{ c.total_lines }}
-            </div>
-            {% endif %}
-            {% if c.tags %}
-            <div class="meta-item">
-                <strong>Tags:</strong>
-                {% for tag in c.tags %}
-                    <span class="tag">{{ tag }}</span>
-                {% endfor %}
-            </div>
-            {% endif %}
+        {% set stats = pr_stats.get(c.flag_key) %}
+        {% if stats %}
+        <div class="pr-impact-row">
+            <span class="pr-deletions">&minus;{{ stats.deletions }} lines</span>
+            <span class="pr-impact-sep">across</span>
+            <span class="pr-files">{{ stats.files_changed }} file{{ 's' if stats.files_changed != 1 }}</span>
         </div>
+        {% endif %}
 
         <details class="file-details">
             <summary>Affected files</summary>
