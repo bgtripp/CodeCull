@@ -66,7 +66,7 @@ def _apply_state_to_candidates(candidates: list[FlagCandidate]) -> None:
             c.status = "done"
         elif status in ("running", "in_progress"):
             c.status = "in_progress"
-        elif status == "error":
+        elif status in ("error", "finished", "stopped", "blocked"):
             c.status = "error"
         else:
             c.status = "pending"

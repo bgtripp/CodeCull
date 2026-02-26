@@ -128,6 +128,7 @@ def sync_state(state_path: Path | None = None) -> dict:
                     sessions[flag_key]["pr_url"] = pr_url
                     logger.info("  -> %s: PR found: %s", flag_key, pr_url)
                 else:
+                    sessions[flag_key]["status"] = "error"
                     logger.warning("  -> %s: session finished but no PR URL found", flag_key)
             except Exception:
                 logger.exception("Failed to poll session for %s", flag_key)
