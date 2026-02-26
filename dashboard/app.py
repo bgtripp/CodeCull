@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,8 +133,8 @@ async def _check_auth(
         return  # auth disabled
     if (
         credentials is None
-        or credentials.username != _AUTH_USER
-        or credentials.password != _AUTH_PASS
+        or not secrets.compare_digest(credentials.username.encode(), _AUTH_USER.encode())
+        or not secrets.compare_digest(credentials.password.encode(), _AUTH_PASS.encode())
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
