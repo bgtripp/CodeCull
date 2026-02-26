@@ -11,11 +11,17 @@ A flag is considered *stale* when:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -195,12 +201,68 @@ def analyse_flags(
 # Convenience entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Repo cloning helper
+# ---------------------------------------------------------------------------
+
+_cloned_repo_dir: str | None = None
+
+
+def clone_target_repo() -> str:
+    """Clone the target GitHub repo into a temp directory and return its path.
+
+    The clone is cached for the lifetime of the process so repeated scans
+    do ``git pull`` instead of a full clone.
+    """
+    global _cloned_repo_dir
+
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    repo_url = f"https://github.com/{repo_slug}.git"
+
+    if _cloned_repo_dir and Path(_cloned_repo_dir).exists():
+        logger.info("Pulling latest changes in cached clone %s", _cloned_repo_dir)
+        subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=_cloned_repo_dir,
+            capture_output=True,
+            timeout=60,
+        )
+        return _cloned_repo_dir
+
+    tmp = tempfile.mkdtemp(prefix="codecull-target-")
+    logger.info("Cloning %s into %s", repo_url, tmp)
+    result = subprocess.run(
+        ["git", "clone", "--depth=1", repo_url, tmp],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(f"Failed to clone {repo_url}: {result.stderr.strip()}")
+
+    _cloned_repo_dir = tmp
+    return tmp
+
+
+def get_target_repo_path() -> str:
+    """Return the local path to the target repo.
+
+    If ``TARGET_REPO_PATH`` is set, use it directly (local development).
+    Otherwise clone ``TARGET_REPO`` from GitHub.
+    """
+    explicit = os.getenv("TARGET_REPO_PATH")
+    if explicit:
+        return explicit
+    return clone_target_repo()
+
+
 def run_scan(
     repo_path: str | None = None,
     ld_data_path: str | None = None,
 ) -> list[FlagCandidate]:
     """Run a full scan and return stale flag candidates."""
-    repo_path = repo_path or os.getenv("TARGET_REPO_PATH", "./demo_service")
+    repo_path = repo_path or get_target_repo_path()
     ld_data_path = ld_data_path or os.getenv("MOCK_LD_DATA_PATH", "./mock_launchdarkly.json")
 
     code_flags = scan_codebase(repo_path)

@@ -23,7 +23,7 @@ from scanner.devin_integration import (
     extract_pr_url,
     poll_session_until_done,
 )
-from scanner.flag_scanner import FlagCandidate, run_scan
+from scanner.flag_scanner import FlagCandidate, get_target_repo_path, run_scan
 from scanner.slack_notify import notify_flag_author
 
 load_dotenv()
@@ -97,7 +97,7 @@ async def approve_flag(flag_key: str, background_tasks: BackgroundTasks):
 
     candidate.status = "in_progress"
 
-    target_repo = os.getenv("TARGET_REPO", "bgtripp/CodeCull")
+    target_repo = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
 
     try:
         result = create_cleanup_session(
@@ -174,7 +174,7 @@ def _poll_and_notify(flag_key: str, candidate: FlagCandidate) -> None:
         candidate.status = "done"
 
         # Send Slack DM to the flag author
-        repo_path = os.getenv("TARGET_REPO_PATH", "./demo_service")
+        repo_path = get_target_repo_path()
         first_file = candidate.files_affected[0] if candidate.files_affected else ""
 
         try:

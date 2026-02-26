@@ -42,9 +42,9 @@ python main.py
 | `TARGET_REPO_PATH` | Path to local clone of the target repo |
 | `MOCK_LD_DATA_PATH` | Path to mock LaunchDarkly JSON file |
 
-## Demo repo
+## Target repo
 
-The `demo_service/` directory is a realistic Python service seeded with 5 feature flags:
+CodeCull scans an external repo — [`bgtripp/LogiOps`](https://github.com/bgtripp/LogiOps) — a demo Python service seeded with 5 feature flags:
 
 | Flag | Status | Candidate? |
 |---|---|---|
@@ -54,23 +54,16 @@ The `demo_service/` directory is a realistic Python service seeded with 5 featur
 | `rollout-search-suggestions` | 50% rollout (active) | No |
 | `enable-dark-mode` | ON for 10 days (too recent) | No |
 
+On startup the scanner clones `TARGET_REPO` automatically. Set `TARGET_REPO_PATH` to point at a local checkout instead.
+
 ## Project structure
 
 ```
 CodeCull/
 ├── main.py                  # Entry point (dashboard or CLI scan)
 ├── mock_launchdarkly.json   # Mock LD flag data
-├── demo_service/            # Demo Python service with feature flags
-│   ├── feature_flags.py     # Flag client
-│   ├── checkout.py          # Uses enable-new-checkout-flow
-│   ├── dashboard_ui.py      # Uses show-redesigned-dashboard
-│   ├── pricing.py           # Uses use-v2-pricing-engine
-│   ├── search.py            # Uses rollout-search-suggestions
-│   ├── settings.py          # Uses enable-dark-mode
-│   ├── config.py            # Flag key constants
-│   └── tests/               # Unit tests
 ├── scanner/
-│   ├── flag_scanner.py      # Code scanner + staleness analysis
+│   ├── flag_scanner.py      # Code scanner + staleness analysis + repo cloning
 │   ├── devin_integration.py # Devin API session management
 │   └── slack_notify.py      # Slack DM notifications
 └── dashboard/
