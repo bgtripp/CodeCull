@@ -24,7 +24,8 @@
         }
       },
       "tags": ["checkout", "migration"],
-      "maintainer_email": "bgtripp@users.noreply.github.com"
+      "maintainer_email": "bentrippx@gmail.com",
+      "maintainer_name": "Ben Tripp"
     },
     {
       "key": "show-redesigned-dashboard",
@@ -50,7 +51,8 @@
         }
       },
       "tags": ["dashboard", "ui"],
-      "maintainer_email": "bgtripp@users.noreply.github.com"
+      "maintainer_email": "bentrippx@gmail.com",
+      "maintainer_name": "Ben Tripp"
     },
     {
       "key": "use-v2-pricing-engine",
@@ -76,7 +78,8 @@
         }
       },
       "tags": ["pricing", "experiment"],
-      "maintainer_email": "bgtripp@users.noreply.github.com"
+      "maintainer_email": "bentrippx@gmail.com",
+      "maintainer_name": "Ben Tripp"
     },
     {
       "key": "rollout-search-suggestions",
@@ -107,7 +110,8 @@
         }
       },
       "tags": ["search", "rollout"],
-      "maintainer_email": "bgtripp@users.noreply.github.com"
+      "maintainer_email": "bentrippx@gmail.com",
+      "maintainer_name": "Ben Tripp"
     },
     {
       "key": "enable-dark-mode",
@@ -133,7 +137,8 @@
         }
       },
       "tags": ["ui", "theme"],
-      "maintainer_email": "bgtripp@users.noreply.github.com"
+      "maintainer_email": "bentrippx@gmail.com",
+      "maintainer_name": "Ben Tripp"
     }
   ]
 }

@@ -208,7 +208,21 @@ header {
 .flag-desc {
     color: var(--text-muted);
     font-size: 0.875rem;
-    margin-bottom: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.flag-owner {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
+}
+
+.flag-owner svg {
+    flex-shrink: 0;
+    opacity: 0.6;
 }
 
 /* ---- Badges ---- */
