@@ -3,26 +3,27 @@
 {% block title %}CodeCull &mdash; Dashboard{% endblock %}
 
 {% block content %}
+{% set visible = candidates|selectattr('status', 'ne', 'skipped')|list %}
+{% set ready = visible|selectattr('status', 'equalto', 'done')|list %}
+
 <div class="toolbar">
-    <h2>Cleanup Candidates</h2>
-    <div class="toolbar-right">
+    <div class="toolbar-left">
+        <span class="toolbar-title">Cleanup queue</span>
         {% if last_scan_time %}
-        <span class="last-scan">Last scan: {{ last_scan_time.strftime('%b %d, %Y %H:%M UTC') }}</span>
+        <span class="last-scan">Last scan {{ last_scan_time.strftime('%b %d, %Y %H:%M UTC') }}</span>
         {% endif %}
-        <form method="post" action="/scan">
-            <button type="submit" class="btn btn-secondary">Scan</button>
-        </form>
     </div>
+    <span class="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready for review</span>
 </div>
 
-{% if not candidates %}
+{% if not visible %}
 <div class="empty-state">
-    <p>No stale flags found. Run a scan or check your configuration.</p>
+    <p>No stale flags found. All clean!</p>
 </div>
 {% endif %}
 
 <div class="card-list">
-{% for c in candidates %}
+{% for c in visible %}
     <div class="card card--{{ c.status }}">
         <div class="card-header">
             <div class="flag-info">
@@ -31,14 +32,12 @@
                 <span class="badge badge--age">{{ c.days_stale }} days stale</span>
             </div>
             <div class="card-status">
-                {% if c.status == "pending" %}
-                    <span class="status-dot status-dot--pending"></span> Pending
+                {% if c.status == "done" %}
+                    <span class="status-dot status-dot--done"></span> PR Ready
                 {% elif c.status == "in_progress" %}
                     <span class="status-dot status-dot--progress"></span> Devin working&hellip;
-                {% elif c.status == "done" %}
-                    <span class="status-dot status-dot--done"></span> PR Ready
-                {% elif c.status == "skipped" %}
-                    <span class="status-dot status-dot--skipped"></span> Skipped
+                {% elif c.status == "pending" %}
+                    <span class="status-dot status-dot--pending"></span> Queued
                 {% elif c.status == "error" %}
                     <span class="status-dot status-dot--error"></span> Error
                 {% endif %}
@@ -47,25 +46,14 @@
 
         <p class="flag-desc">{{ c.description }}</p>
 
-        <div class="meta-row">
-            <div class="meta-item">
-                <strong>Name:</strong> {{ c.flag_name }}
-            </div>
-            <div class="meta-item">
-                <strong>Files:</strong> {{ c.files_affected | length }}
-            </div>
-            <div class="meta-item">
-                <strong>References:</strong> {{ c.total_lines }}
-            </div>
-            {% if c.tags %}
-            <div class="meta-item">
-                <strong>Tags:</strong>
-                {% for tag in c.tags %}
-                    <span class="tag">{{ tag }}</span>
-                {% endfor %}
-            </div>
-            {% endif %}
+        {% set stats = pr_stats.get(c.flag_key) %}
+        {% if stats %}
+        <div class="pr-impact-row">
+            <span class="pr-deletions">&minus;{{ stats.deletions }} lines</span>
+            <span class="pr-impact-sep">across</span>
+            <span class="pr-files">{{ stats.files_changed }} file{{ 's' if stats.files_changed != 1 }}</span>
         </div>
+        {% endif %}
 
         <details class="file-details">
             <summary>Affected files</summary>
@@ -76,56 +64,27 @@
             </ul>
         </details>
 
-        <details class="file-details">
-            <summary>Code references</summary>
-            <table class="ref-table">
-                <thead>
-                    <tr><th>File</th><th>Line</th><th>Code</th></tr>
-                </thead>
-                <tbody>
-                {% for occ in c.occurrences %}
-                    <tr>
-                        <td><code>{{ occ.file_path }}</code></td>
-                        <td>{{ occ.line_number }}</td>
-                        <td><code>{{ occ.line_text }}</code></td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </details>
-
-        {% if sessions.get(c.flag_key) %}
+        {% if sessions.get(c.flag_key) and sessions[c.flag_key].get('session_id') %}
         <div class="session-info">
             {% set s = sessions[c.flag_key] %}
             <p>
                 <strong>Devin session:</strong>
                 <a href="{{ s.url }}" target="_blank">{{ s.session_id[:12] }}&hellip;</a>
-                &mdash; {{ s.status }}
             </p>
-            {% if s.pr_url %}
-            <p>
-                <strong>Pull request:</strong>
-                <a href="{{ s.pr_url }}" target="_blank">{{ s.pr_url }}</a>
-            </p>
-            {% endif %}
         </div>
         {% endif %}
 
         <div class="card-actions">
-            {% if c.status == "pending" %}
-            <form method="post" action="/approve/{{ c.flag_key }}">
-                <button type="submit" class="btn btn-approve">Approve Cleanup</button>
-            </form>
-            <form method="post" action="/skip/{{ c.flag_key }}">
-                <button type="submit" class="btn btn-skip">Skip</button>
-            </form>
+            {% set s = sessions.get(c.flag_key, {}) %}
+            {% if s.pr_url %}
+            <a href="{{ s.pr_url }}" class="btn btn-primary" target="_blank">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                Review PR
+            </a>
             {% elif c.status == "in_progress" %}
             <button class="btn btn-disabled" disabled>Devin is working&hellip;</button>
             {% elif c.status == "done" %}
-            {% set s = sessions.get(c.flag_key, {}) %}
-            {% if s.pr_url %}
-            <a href="{{ s.pr_url }}" class="btn btn-approve" target="_blank">View PR</a>
-            {% endif %}
+            <span class="btn btn-disabled">PR link pending&hellip;</span>
             {% endif %}
         </div>
     </div>

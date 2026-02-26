@@ -99,6 +99,7 @@ def create_cleanup_session(
     payload = {
         "prompt": prompt,
         "idempotent": False,
+        "tags": ["CodeCull", f"flag:{flag_key}"],
     }
 
     resp = httpx.post(
