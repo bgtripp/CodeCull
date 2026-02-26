@@ -32,7 +32,9 @@ def _api_base() -> str:
         org_id = os.getenv("DEVIN_ORG_ID", "")
         if org_id:
             return f"{DEVIN_API_V3_BASE}/{org_id}"
-        return DEVIN_API_V3_BASE
+        raise RuntimeError(
+            "DEVIN_ORG_ID environment variable is required for cog_ service-user keys"
+        )
     return DEVIN_API_V1
 
 
