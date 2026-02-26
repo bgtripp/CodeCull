@@ -160,6 +160,7 @@ def _generate_otp(email: str) -> str:
     _otp_store[email.lower()] = {
         "code": code,
         "expires_at": time.time() + _OTP_TTL,
+        "attempts": 0,
     }
     return code
 
@@ -173,6 +174,9 @@ def _verify_otp(email: str, code: str) -> bool:
         _otp_store.pop(email.lower(), None)
         return False
     if not secrets.compare_digest(entry["code"], code.strip()):
+        entry["attempts"] = entry.get("attempts", 0) + 1
+        if entry["attempts"] >= 5:
+            _otp_store.pop(email.lower(), None)
         return False
     # OTP is single-use
     _otp_store.pop(email.lower(), None)
