@@ -227,6 +227,7 @@ def _send_slack_ready_notification(
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Open Dashboard"},
+                    "action_id": "open_dashboard",
                     "url": dashboard_url,
                     "style": "primary",
                 }
