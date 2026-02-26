@@ -118,12 +118,12 @@ header {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
-    background: transparent;
+    background: var(--surface-hover);
     color: var(--text);
     border: 1px solid var(--border);
 }
 .btn-primary:hover {
-    background: var(--surface-hover);
+    background: var(--border);
     border-color: var(--text-muted);
 }
 .btn-primary svg { flex-shrink: 0; }
@@ -170,15 +170,11 @@ header {
 }
 
 .card:hover {
-    border-color: var(--accent);
+    border-color: var(--text-muted);
 }
 
 .card--skipped {
     opacity: 0.5;
-}
-
-.card--done {
-    border-color: var(--green);
 }
 
 .card--in_progress {
