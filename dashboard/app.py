@@ -268,7 +268,7 @@ async def verify_submit(request: Request, email: str = Form(...), code: str = Fo
     """Verify OTP code and set session cookie."""
     email = email.strip().lower()
 
-    if not _verify_otp(email, code):
+    if not _is_email_allowed(email) or not _verify_otp(email, code):
         return templates.TemplateResponse(
             "verify.html",
             {"request": request, "email": email, "error": "Invalid or expired code. Please try again."},
