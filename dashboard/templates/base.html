@@ -14,6 +14,12 @@
                     <span class="logo-icon">&#x2702;</span> CodeCull
                 </h1>
                 <p class="tagline">Stale feature flag cleanup</p>
+                {% if user_email %}
+                <div class="header-user">
+                    <span class="user-email">{{ user_email }}</span>
+                    <a href="/auth/logout" class="logout-link">Sign out</a>
+                </div>
+                {% endif %}
             </div>
         </div>
     </header>

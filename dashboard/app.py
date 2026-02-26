@@ -12,16 +12,18 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from scanner.flag_scanner import FlagCandidate, run_scan
 from scanner.github_stats import fetch_pr_stats
@@ -117,47 +119,202 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 # ---------------------------------------------------------------------------
-# HTTP Basic Auth (optional — enabled when DASHBOARD_USER is set)
+# Email OTP Auth
 # ---------------------------------------------------------------------------
-_security = HTTPBasic(auto_error=False)
+_SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32))
+_RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+_SESSION_MAX_AGE = 60 * 60 * 24 * 7  # 7 days
+_OTP_TTL = 600  # 10 minutes
 
-_AUTH_USER = os.getenv("DASHBOARD_USER", "")
-_AUTH_PASS = os.getenv("DASHBOARD_PASS", "")
+_serializer = URLSafeTimedSerializer(_SESSION_SECRET)
 
-if _AUTH_USER and not _AUTH_PASS:
-    logger.warning("DASHBOARD_USER is set but DASHBOARD_PASS is empty — auth is disabled")
+# Allowed email addresses / domains
+_ALLOWED_EMAILS: set[str] = set()
+_ALLOWED_DOMAINS: set[str] = set()
+
+for entry in os.getenv("ALLOWED_AUTH_EMAILS", "bentrippx@gmail.com,@cognition.ai").split(","):
+    entry = entry.strip().lower()
+    if not entry:
+        continue
+    if entry.startswith("@"):
+        _ALLOWED_DOMAINS.add(entry)
+    else:
+        _ALLOWED_EMAILS.add(entry)
+
+# In-memory OTP store: email -> {code, expires_at}
+_otp_store: dict[str, dict] = {}
 
 
-async def _check_auth(
-    credentials: HTTPBasicCredentials | None = Depends(_security),
-) -> None:
-    """Require HTTP Basic Auth when ``DASHBOARD_USER`` is configured."""
-    if not _AUTH_USER or not _AUTH_PASS:
-        return  # auth disabled
-    if (
-        credentials is None
-        or not secrets.compare_digest(credentials.username.encode(), _AUTH_USER.encode())
-        or not secrets.compare_digest(credentials.password.encode(), _AUTH_PASS.encode())
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
+def _is_email_allowed(email: str) -> bool:
+    """Check if an email is in the allow-list."""
+    email = email.lower().strip()
+    if email in _ALLOWED_EMAILS:
+        return True
+    domain = "@" + email.split("@")[-1]
+    return domain in _ALLOWED_DOMAINS
+
+
+def _generate_otp(email: str) -> str:
+    """Generate and store a 6-digit OTP for the given email."""
+    code = "".join(secrets.choice("0123456789") for _ in range(6))
+    _otp_store[email.lower()] = {
+        "code": code,
+        "expires_at": time.time() + _OTP_TTL,
+    }
+    return code
+
+
+def _verify_otp(email: str, code: str) -> bool:
+    """Verify an OTP code for the given email."""
+    entry = _otp_store.get(email.lower())
+    if not entry:
+        return False
+    if time.time() > entry["expires_at"]:
+        _otp_store.pop(email.lower(), None)
+        return False
+    if not secrets.compare_digest(entry["code"], code.strip()):
+        return False
+    # OTP is single-use
+    _otp_store.pop(email.lower(), None)
+    return True
+
+
+def _send_otp_email(email: str, code: str) -> bool:
+    """Send the OTP code via Resend API. Returns True on success."""
+    if not _RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY not set — logging OTP to console instead")
+        logger.info("OTP for %s: %s", email, code)
+        return True
+
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {_RESEND_API_KEY}"},
+            json={
+                "from": os.getenv("OTP_FROM_EMAIL", "CodeCull <onboarding@resend.dev>"),
+                "to": [email],
+                "subject": f"Your CodeCull login code: {code}",
+                "html": (
+                    f"<h2>Your CodeCull verification code</h2>"
+                    f"<p style='font-size:32px;font-family:monospace;letter-spacing:8px;"  # noqa: E501
+                    f"font-weight:bold;'>{code}</p>"
+                    f"<p>This code expires in 10 minutes.</p>"
+                    f"<p style='color:#666;font-size:12px;'>If you didn't request this, ignore this email.</p>"
+                ),
+            },
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            logger.error("Resend API error %d: %s", resp.status_code, resp.text)
+            return False
+        return True
+    except Exception:
+        logger.exception("Failed to send OTP email")
+        return False
+
+
+def _get_session_email(request: Request) -> str | None:
+    """Extract the authenticated email from the session cookie."""
+    token = request.cookies.get("codecull_session")
+    if not token:
+        return None
+    try:
+        email = _serializer.loads(token, max_age=_SESSION_MAX_AGE)
+        return email
+    except BadSignature:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------------------------
+
+@app.get("/auth/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    """Show the email login form."""
+    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+
+
+@app.post("/auth/login")
+async def login_submit(request: Request, email: str = Form(...)):
+    """Validate email, generate OTP, send it, redirect to verify page."""
+    email = email.strip().lower()
+
+    if not _is_email_allowed(email):
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "This email address is not authorized."},
+            status_code=403,
         )
 
+    code = _generate_otp(email)
+    sent = _send_otp_email(email, code)
+
+    if not sent:
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Failed to send email. Please try again."},
+            status_code=500,
+        )
+
+    return templates.TemplateResponse(
+        "verify.html",
+        {"request": request, "email": email, "error": None},
+    )
+
+
+@app.post("/auth/verify")
+async def verify_submit(request: Request, email: str = Form(...), code: str = Form(...)):
+    """Verify OTP code and set session cookie."""
+    email = email.strip().lower()
+
+    if not _verify_otp(email, code):
+        return templates.TemplateResponse(
+            "verify.html",
+            {"request": request, "email": email, "error": "Invalid or expired code. Please try again."},
+            status_code=401,
+        )
+
+    # Create signed session cookie
+    token = _serializer.dumps(email)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        key="codecull_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        max_age=_SESSION_MAX_AGE,
+        path="/",
+    )
+    logger.info("User %s authenticated successfully", email)
+    return response
+
+
+@app.get("/auth/logout")
+async def logout():
+    """Clear session cookie and redirect to login."""
+    response = RedirectResponse(url="/auth/login", status_code=303)
+    response.delete_cookie("codecull_session", path="/")
+    return response
+
 
 # ---------------------------------------------------------------------------
-# Routes
+# Protected routes
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request, _auth: None = Depends(_check_auth)):
+async def index(request: Request):
     """Main dashboard page.
 
     On every load we re-check each PR's status on GitHub.  Merged or
     closed PRs are automatically removed from the queue so the engineer
     never has to manually dismiss them.
     """
+    email = _get_session_email(request)
+    if not email:
+        return RedirectResponse(url="/auth/login", status_code=303)
+
     _refresh_pr_statuses()
 
     return templates.TemplateResponse(
@@ -168,13 +325,16 @@ async def index(request: Request, _auth: None = Depends(_check_auth)):
             "sessions": _sessions,
             "pr_stats": _pr_stats,
             "last_scan_time": _last_scan_time,
+            "user_email": email,
         },
     )
 
 
 @app.post("/skip/{flag_key}")
-async def skip_flag(flag_key: str, _auth: None = Depends(_check_auth)):
+async def skip_flag(request: Request, flag_key: str):
     """Mark a flag as skipped."""
+    if not _get_session_email(request):
+        return RedirectResponse(url="/auth/login", status_code=303)
     candidate = _find_candidate(flag_key)
     if candidate is not None:
         candidate.status = "skipped"
@@ -182,8 +342,10 @@ async def skip_flag(flag_key: str, _auth: None = Depends(_check_auth)):
 
 
 @app.get("/status/{flag_key}")
-async def flag_status(flag_key: str, _auth: None = Depends(_check_auth)):
+async def flag_status(request: Request, flag_key: str):
     """Return JSON status for a flag (used by the dashboard for polling)."""
+    if not _get_session_email(request):
+        raise HTTPException(status_code=401, detail="Not authenticated")
     session_info = _sessions.get(flag_key, {})
     candidate = _find_candidate(flag_key)
     return {
