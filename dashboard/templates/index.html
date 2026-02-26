@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+
+{% block title %}CodeCull &mdash; Dashboard{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+    <h2>Cleanup Candidates</h2>
+    <form method="post" action="/scan">
+        <button type="submit" class="btn btn-secondary">Re-scan</button>
+    </form>
+</div>
+
+{% if not candidates %}
+<div class="empty-state">
+    <p>No stale flags found. Run a scan or check your configuration.</p>
+</div>
+{% endif %}
+
+<div class="card-list">
+{% for c in candidates %}
+    <div class="card card--{{ c.status }}">
+        <div class="card-header">
+            <div class="flag-info">
+                <h3 class="flag-key">{{ c.flag_key }}</h3>
+                <span class="badge badge--{{ c.variation_served }}">{{ c.variation_served }}</span>
+                <span class="badge badge--age">{{ c.days_stale }} days stale</span>
+            </div>
+            <div class="card-status">
+                {% if c.status == "pending" %}
+                    <span class="status-dot status-dot--pending"></span> Pending
+                {% elif c.status == "in_progress" %}
+                    <span class="status-dot status-dot--progress"></span> Devin working&hellip;
+                {% elif c.status == "done" %}
+                    <span class="status-dot status-dot--done"></span> PR Ready
+                {% elif c.status == "skipped" %}
+                    <span class="status-dot status-dot--skipped"></span> Skipped
+                {% elif c.status == "error" %}
+                    <span class="status-dot status-dot--error"></span> Error
+                {% endif %}
+            </div>
+        </div>
+
+        <p class="flag-desc">{{ c.description }}</p>
+
+        <div class="meta-row">
+            <div class="meta-item">
+                <strong>Name:</strong> {{ c.flag_name }}
+            </div>
+            <div class="meta-item">
+                <strong>Files:</strong> {{ c.files_affected | length }}
+            </div>
+            <div class="meta-item">
+                <strong>References:</strong> {{ c.total_lines }}
+            </div>
+            {% if c.tags %}
+            <div class="meta-item">
+                <strong>Tags:</strong>
+                {% for tag in c.tags %}
+                    <span class="tag">{{ tag }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+
+        <details class="file-details">
+            <summary>Affected files</summary>
+            <ul>
+            {% for f in c.files_affected %}
+                <li><code>{{ f }}</code></li>
+            {% endfor %}
+            </ul>
+        </details>
+
+        <details class="file-details">
+            <summary>Code references</summary>
+            <table class="ref-table">
+                <thead>
+                    <tr><th>File</th><th>Line</th><th>Code</th></tr>
+                </thead>
+                <tbody>
+                {% for occ in c.occurrences %}
+                    <tr>
+                        <td><code>{{ occ.file_path }}</code></td>
+                        <td>{{ occ.line_number }}</td>
+                        <td><code>{{ occ.line_text }}</code></td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </details>
+
+        {% if sessions.get(c.flag_key) %}
+        <div class="session-info">
+            {% set s = sessions[c.flag_key] %}
+            <p>
+                <strong>Devin session:</strong>
+                <a href="{{ s.url }}" target="_blank">{{ s.session_id[:12] }}&hellip;</a>
+                &mdash; {{ s.status }}
+            </p>
+            {% if s.pr_url %}
+            <p>
+                <strong>Pull request:</strong>
+                <a href="{{ s.pr_url }}" target="_blank">{{ s.pr_url }}</a>
+            </p>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <div class="card-actions">
+            {% if c.status == "pending" %}
+            <form method="post" action="/approve/{{ c.flag_key }}">
+                <button type="submit" class="btn btn-approve">Approve Cleanup</button>
+            </form>
+            <form method="post" action="/skip/{{ c.flag_key }}">
+                <button type="submit" class="btn btn-skip">Skip</button>
+            </form>
+            {% elif c.status == "in_progress" %}
+            <button class="btn btn-disabled" disabled>Devin is working&hellip;</button>
+            {% elif c.status == "done" %}
+            {% set s = sessions.get(c.flag_key, {}) %}
+            {% if s.pr_url %}
+            <a href="{{ s.pr_url }}" class="btn btn-approve" target="_blank">View PR</a>
+            {% endif %}
+            {% endif %}
+        </div>
+    </div>
+{% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Auto-refresh status for in-progress flags
+(function() {
+    const inProgress = document.querySelectorAll('.card--in_progress');
+    if (inProgress.length === 0) return;
+
+    setInterval(function() {
+        location.reload();
+    }, 15000);
+})();
+</script>
+{% endblock %}
