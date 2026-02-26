@@ -10,16 +10,20 @@ A flag is considered *stale* when:
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +235,32 @@ def _sanitize(text: str, token: str) -> str:
     return text
 
 
+def _download_tarball() -> str:
+    """Download the repo as a tarball via GitHub API (no git required)."""
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    token = os.getenv("GITHUB_TOKEN", "")
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    url = f"https://api.github.com/repos/{repo_slug}/tarball"
+    logger.info("Downloading tarball for %s via GitHub API", repo_slug)
+
+    with httpx.Client(follow_redirects=True, timeout=120) as client:
+        resp = client.get(url, headers=headers)
+        resp.raise_for_status()
+
+    tmp = tempfile.mkdtemp(prefix="codecull-target-")
+    with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz") as tar:
+        tar.extractall(tmp)  # noqa: S202
+
+    # GitHub tarballs extract into a single top-level directory
+    entries = list(Path(tmp).iterdir())
+    if len(entries) == 1 and entries[0].is_dir():
+        return str(entries[0])
+    return tmp
+
+
 def clone_target_repo() -> str:
     """Clone the target GitHub repo into a temp directory and return its path.
 
@@ -239,8 +269,17 @@ def clone_target_repo() -> str:
 
     If ``GITHUB_TOKEN`` is set, it is used to authenticate the clone
     (required for private repos).
+
+    Falls back to downloading a tarball via GitHub API when ``git`` is not
+    available (e.g. in containerised deployments).
     """
     global _cloned_repo_dir
+
+    # Check if git is available
+    if not shutil.which("git"):
+        logger.info("git not found — falling back to GitHub API tarball download")
+        _cloned_repo_dir = _download_tarball()
+        return _cloned_repo_dir
 
     repo_url, token = _build_repo_url()
 
