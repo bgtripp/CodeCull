@@ -50,6 +50,7 @@ class FlagCandidate:
     occurrences: list[FlagOccurrence] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     maintainer_email: str = ""
+    maintainer_name: str = ""
     status: str = "pending"  # pending | approved | skipped | in_progress | done
 
 
@@ -189,6 +190,7 @@ def analyse_flags(
                 occurrences=occurrences,
                 tags=ld.get("tags", []),
                 maintainer_email=ld.get("maintainer_email", ""),
+                maintainer_name=ld.get("maintainer_name", ""),
             )
         )
 
