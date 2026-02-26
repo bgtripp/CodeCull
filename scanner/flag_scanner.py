@@ -135,7 +135,7 @@ def _unleash_login(base_url: str) -> str:
         return resp.headers.get("set-cookie", "")
 
 
-def load_unleash_flags(base_url: str, environment: str = "development") -> dict:
+def load_unleash_flags(base_url: str, environment: str = "production") -> dict:
     """Fetch flags from Unleash Admin API and normalise to the LD-like schema.
 
     Returns a dict keyed by flag name (key) with the same shape the
