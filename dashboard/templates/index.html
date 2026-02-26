@@ -84,7 +84,7 @@
             </ul>
         </details>
 
-        {% if sessions.get(c.flag_key) %}
+        {% if sessions.get(c.flag_key) and sessions[c.flag_key].get('session_id') %}
         <div class="session-info">
             {% set s = sessions[c.flag_key] %}
             <p>
