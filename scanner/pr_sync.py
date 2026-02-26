@@ -169,20 +169,39 @@ def _send_slack_ready_notification(
     sessions: dict[str, dict],
     dashboard_url: str,
 ) -> None:
-    """DM the flag author(s) a summary: 'N PRs ready for review'."""
+    """DM the flag author(s) a summary: 'N PRs ready for review'.
+
+    Owner resolution order:
+      1. LaunchDarkly ``maintainer_email`` (from flag metadata)
+      2. ``git blame`` on the first affected file
+      3. ``SLACK_NOTIFY_EMAIL`` env var (manual fallback)
+    """
     ready = [c for c in candidates if sessions.get(c.flag_key, {}).get("pr_url")]
     if not ready:
         logger.info("No ready PRs; skipping Slack notification")
         return
 
-    # Use SLACK_NOTIFY_EMAIL if set (useful when git blame returns a bot email).
-    # Otherwise fall back to git blame on the first ready flag's file.
-    email = os.getenv("SLACK_NOTIFY_EMAIL", "")
+    # 1. Try LaunchDarkly maintainer_email from flag metadata
+    email = ""
+    first = ready[0]
+    if first.maintainer_email:
+        email = first.maintainer_email
+        logger.info("Using LaunchDarkly maintainer_email: %s", email)
+
+    # 2. Fall back to git blame
     if not email:
         repo_path = get_target_repo_path()
-        first = ready[0]
         first_file = first.files_affected[0] if first.files_affected else ""
         email = find_flag_author_email(repo_path, first_file, first.flag_key) or ""
+        if email:
+            logger.info("Using git blame author: %s", email)
+
+    # 3. Fall back to SLACK_NOTIFY_EMAIL env var
+    if not email:
+        email = os.getenv("SLACK_NOTIFY_EMAIL", "")
+        if email:
+            logger.info("Using SLACK_NOTIFY_EMAIL fallback: %s", email)
+
     if not email:
         logger.warning("Could not find author email for Slack notification")
         return
