@@ -30,11 +30,8 @@ from scanner.devin_integration import create_rebase_session, poll_session_until_
 from scanner.flag_scanner import FlagCandidate, run_scan
 from scanner.github_stats import (
     fetch_pr_stats,
-    get_pr_branch,
-    is_pr_mergeable,
     list_pull_requests,
     merge_main_into_branch,
-    parse_pr_url,
 )
 from scanner.pr_sync import sync_state
 from scanner.state_store import load_state, save_state
@@ -523,6 +520,7 @@ def api_sync_status(request: Request):
 # Auto-rebase API
 # ---------------------------------------------------------------------------
 
+_rebase_lock = threading.Lock()
 _rebase_status: dict = {"running": False, "last_run": None, "results": []}
 
 
@@ -551,6 +549,9 @@ def api_rebase_next(request: Request):
     _check_auth(request)
 
     if _rebase_status["running"]:
+        return {"status": "already_running", "message": "A rebase job is already in progress."}
+
+    if not _rebase_lock.acquire(blocking=False):
         return {"status": "already_running", "message": "A rebase job is already in progress."}
 
     _rebase_status["running"] = True
@@ -635,7 +636,13 @@ def api_rebase_next(request: Request):
             _rebase_status["last_run"] = datetime.now(timezone.utc).isoformat()
             logger.info("Rebase job completed: %d result(s)", len(results))
 
-    threading.Thread(target=_rebase_worker, daemon=True).start()
+    def _locked_worker() -> None:
+        try:
+            _rebase_worker()
+        finally:
+            _rebase_lock.release()
+
+    threading.Thread(target=_locked_worker, daemon=True).start()
     return {"status": "started", "message": "Rebase job started in background."}
 
 

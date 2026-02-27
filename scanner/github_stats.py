@@ -135,7 +135,7 @@ def merge_main_into_branch(repo_slug: str, branch: str) -> bool:
             json={"base": branch, "head": "main", "commit_message": f"Merge main into {branch}"},
             timeout=30,
         )
-        if resp.status_code in (201, 204):
+        if resp.status_code == 201:
             logger.info("Successfully merged main into %s", branch)
             return True
         if resp.status_code == 204:
