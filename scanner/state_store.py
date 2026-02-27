@@ -33,13 +33,20 @@ def load_state(path: Path) -> dict[str, Any]:
         return {}
 
 
-def save_state(path: Path, sessions: dict[str, Any], pr_stats: dict[str, Any]) -> None:
-    """Persist *sessions* and *pr_stats* to *path* as JSON."""
-    payload = {
+def save_state(
+    path: Path,
+    sessions: dict[str, Any],
+    pr_stats: dict[str, Any],
+    stacked_sessions: dict[str, Any] | None = None,
+) -> None:
+    """Persist *sessions*, *pr_stats*, and *stacked_sessions* to *path* as JSON."""
+    payload: dict[str, Any] = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "sessions": sessions,
         "pr_stats": pr_stats,
     }
+    if stacked_sessions is not None:
+        payload["stacked_sessions"] = stacked_sessions
 
     try:
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

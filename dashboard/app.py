@@ -96,7 +96,7 @@ def _apply_state_to_candidates(candidates: list[FlagCandidate]) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run the scanner at startup, then overlay persisted PR/session state."""
-    global _candidates, _sessions, _pr_stats, _last_scan_time
+    global _candidates, _sessions, _pr_stats, _last_scan_time, _stacked_sessions
 
     logger.info("Running scan...")
     _candidates = run_scan()
@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
     state = load_state(_STATE_PATH)
     _sessions = state.get("sessions", {}) or {}
     _pr_stats = state.get("pr_stats", {}) or {}
+    _stacked_sessions = state.get("stacked_sessions", {}) or {}
 
     _apply_state_to_candidates(_candidates)
 
@@ -484,7 +485,7 @@ def _refresh_pr_statuses() -> None:
     if state_changed:
         # Re-apply statuses and persist
         _apply_state_to_candidates(_candidates)
-        save_state(_STATE_PATH, _sessions, _pr_stats)
+        save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
         logger.info("State refreshed: removed %d, updated others", len(keys_to_remove))
 
 
@@ -601,7 +602,7 @@ def api_fix_selected(request: Request, flag_keys: list[str] = Body(..., embed=Tr
         }
 
     _apply_state_to_candidates(_candidates)
-    save_state(_STATE_PATH, _sessions, _pr_stats)
+    save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
 
     logger.info(
         "Dispatched stacked Devin session %s for %d flags: %s",
@@ -881,7 +882,7 @@ def api_reset_demo(request: Request):
         _pr_stats.clear()
         _stacked_sessions.clear()
         _candidates = []
-        save_state(_STATE_PATH, _sessions, _pr_stats)
+        save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
 
         # Re-scan to pick up restored flags
         _candidates = run_scan()
