@@ -26,8 +26,16 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
+from scanner.devin_integration import create_rebase_session, poll_session_until_done
 from scanner.flag_scanner import FlagCandidate, run_scan
-from scanner.github_stats import fetch_pr_stats
+from scanner.github_stats import (
+    fetch_pr_stats,
+    get_pr_branch,
+    is_pr_mergeable,
+    list_pull_requests,
+    merge_main_into_branch,
+    parse_pr_url,
+)
 from scanner.pr_sync import sync_state
 from scanner.state_store import load_state, save_state
 
@@ -509,3 +517,130 @@ def api_sync_status(request: Request):
         else:
             raise HTTPException(status_code=401, detail="Not authenticated")
     return _sync_status
+
+
+# ---------------------------------------------------------------------------
+# Auto-rebase API
+# ---------------------------------------------------------------------------
+
+_rebase_status: dict = {"running": False, "last_run": None, "results": []}
+
+
+def _check_auth(request: Request) -> None:
+    """Verify the request has a valid session cookie or Bearer token."""
+    email = _get_session_email(request)
+    if not email:
+        auth_header = request.headers.get("authorization", "")
+        if _SYNC_API_TOKEN and auth_header == f"Bearer {_SYNC_API_TOKEN}":
+            return
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+@app.post("/api/rebase-next")
+def api_rebase_next(request: Request):
+    """Update remaining open cleanup PRs after one is merged.
+
+    For each open PR in the target repo whose title starts with
+    "Remove stale flag:", attempt to merge ``main`` into the PR branch
+    via the GitHub API.  If that fails (merge conflict), dispatch a
+    lightweight Devin session to resolve the conflict.
+
+    Runs in a background thread; poll ``GET /api/rebase-next/status``
+    for progress.
+    """
+    _check_auth(request)
+
+    if _rebase_status["running"]:
+        return {"status": "already_running", "message": "A rebase job is already in progress."}
+
+    _rebase_status["running"] = True
+    _rebase_status["results"] = []
+
+    def _rebase_worker() -> None:
+        repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+        results: list[dict] = []
+
+        try:
+            open_prs = list_pull_requests(repo_slug, state="open")
+            cleanup_prs = [
+                pr for pr in open_prs
+                if (pr.get("title") or "").lower().startswith("remove stale flag")
+            ]
+
+            if not cleanup_prs:
+                logger.info("No open cleanup PRs to rebase")
+                results.append({"message": "No open cleanup PRs found"})
+                return
+
+            logger.info("Found %d open cleanup PR(s) to update", len(cleanup_prs))
+
+            for pr in cleanup_prs:
+                pr_number = pr["number"]
+                pr_title = pr.get("title", "")
+                branch = pr.get("head", {}).get("ref", "")
+
+                if not branch:
+                    results.append({
+                        "pr": pr_number,
+                        "title": pr_title,
+                        "action": "skipped",
+                        "reason": "Could not determine branch name",
+                    })
+                    continue
+
+                # Try GitHub API merge first (fast, no Devin needed)
+                logger.info("PR #%d (%s): attempting GitHub API merge of main into %s",
+                            pr_number, pr_title, branch)
+                merged = merge_main_into_branch(repo_slug, branch)
+
+                if merged:
+                    results.append({
+                        "pr": pr_number,
+                        "title": pr_title,
+                        "action": "merged",
+                        "method": "github_api",
+                    })
+                    logger.info("PR #%d: successfully merged main via GitHub API", pr_number)
+                else:
+                    # Conflict — dispatch Devin to resolve
+                    logger.info("PR #%d: conflict detected, dispatching Devin to resolve", pr_number)
+                    try:
+                        session = create_rebase_session(repo_slug, branch, pr_number)
+                        # Poll until Devin finishes (lightweight task, usually <5 min)
+                        final = poll_session_until_done(session["session_id"])
+                        final_state = final.get("status_enum", "unknown")
+                        results.append({
+                            "pr": pr_number,
+                            "title": pr_title,
+                            "action": "devin_resolved" if final_state == "finished" else "devin_failed",
+                            "method": "devin",
+                            "session_url": session["url"],
+                            "session_state": final_state,
+                        })
+                        logger.info("PR #%d: Devin rebase session finished (state=%s)", pr_number, final_state)
+                    except Exception:
+                        logger.exception("PR #%d: Failed to dispatch Devin rebase session", pr_number)
+                        results.append({
+                            "pr": pr_number,
+                            "title": pr_title,
+                            "action": "failed",
+                            "reason": "Could not dispatch Devin rebase session",
+                        })
+        except Exception:
+            logger.exception("Rebase job failed")
+            results.append({"error": "Rebase job failed unexpectedly"})
+        finally:
+            _rebase_status["results"] = results
+            _rebase_status["running"] = False
+            _rebase_status["last_run"] = datetime.now(timezone.utc).isoformat()
+            logger.info("Rebase job completed: %d result(s)", len(results))
+
+    threading.Thread(target=_rebase_worker, daemon=True).start()
+    return {"status": "started", "message": "Rebase job started in background."}
+
+
+@app.get("/api/rebase-next/status")
+def api_rebase_status(request: Request):
+    """Check the status of the last/current rebase job."""
+    _check_auth(request)
+    return _rebase_status

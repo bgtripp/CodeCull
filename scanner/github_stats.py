@@ -120,6 +120,80 @@ def list_pull_requests(repo_slug: str, state: str = "open") -> list[dict]:
     return resp.json()
 
 
+def merge_main_into_branch(repo_slug: str, branch: str) -> bool:
+    """Merge ``main`` into *branch* using the GitHub API.
+
+    Returns ``True`` if the merge succeeded (or was already up-to-date).
+    Returns ``False`` if there are merge conflicts that need manual resolution.
+    """
+    owner, repo = _parse_repo_slug(repo_slug)
+
+    try:
+        resp = httpx.post(
+            f"{GITHUB_API}/repos/{owner}/{repo}/merges",
+            headers=_github_headers(),
+            json={"base": branch, "head": "main", "commit_message": f"Merge main into {branch}"},
+            timeout=30,
+        )
+        if resp.status_code in (201, 204):
+            logger.info("Successfully merged main into %s", branch)
+            return True
+        if resp.status_code == 204:
+            logger.info("Branch %s is already up-to-date with main", branch)
+            return True
+        if resp.status_code == 409:
+            logger.warning("Merge conflict: cannot auto-merge main into %s", branch)
+            return False
+        resp.raise_for_status()
+        return True
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "GitHub merge API returned %d for %s: %s",
+            exc.response.status_code,
+            branch,
+            exc.response.text[:200],
+        )
+        return False
+    except Exception:
+        logger.exception("Failed to merge main into %s", branch)
+        return False
+
+
+def get_pr_branch(repo_slug: str, pr_number: int) -> str | None:
+    """Return the head branch name for a pull request."""
+    owner, repo = _parse_repo_slug(repo_slug)
+    try:
+        resp = httpx.get(
+            f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}",
+            headers=_github_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("head", {}).get("ref")
+    except Exception:
+        logger.exception("Failed to get branch for PR #%d", pr_number)
+        return None
+
+
+def is_pr_mergeable(repo_slug: str, pr_number: int) -> bool | None:
+    """Check if a PR is mergeable (no conflicts).
+
+    Returns ``True`` if mergeable, ``False`` if conflicts, ``None`` if unknown.
+    """
+    owner, repo = _parse_repo_slug(repo_slug)
+    try:
+        resp = httpx.get(
+            f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}",
+            headers=_github_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("mergeable")
+    except Exception:
+        logger.exception("Failed to check mergeability for PR #%d", pr_number)
+        return None
+
+
 def discover_cleanup_prs(repo_slug: str, flag_keys: list[str]) -> dict[str, dict]:
     """Discover Devin-created cleanup PRs for the provided *flag_keys*.
 

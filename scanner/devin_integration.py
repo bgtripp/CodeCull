@@ -151,6 +151,49 @@ def poll_session_until_done(session_id: str) -> dict:
     return get_session_status(session_id)
 
 
+def create_rebase_session(repo: str, branch: str, pr_number: int) -> dict:
+    """Create a Devin session to rebase/resolve conflicts on a PR branch.
+
+    This is a lightweight task — Devin merges ``main`` into the branch,
+    resolves any conflicts, and pushes the result.
+
+    Returns a dict with 'session_id' and 'url'.
+    """
+    prompt = f"""You need to resolve merge conflicts on branch `{branch}` in the repo `{repo}`.
+
+Instructions:
+1. Check out the branch `{branch}`.
+2. Run `git merge origin/main` to merge the latest main branch.
+3. If there are merge conflicts, resolve them:
+   - This branch is removing a stale feature flag. The conflicts likely come from other flag removals that were merged first.
+   - Keep the changes from BOTH sides: the flag removal from this branch AND the other flag removals from main.
+   - Remove any references to flags that were already removed in main.
+4. After resolving conflicts, commit and push.
+5. Do NOT create a new PR — just push to the existing branch `{branch}` (PR #{pr_number} already exists).
+"""
+
+    payload = {
+        "prompt": prompt,
+        "idempotent": False,
+        "tags": ["CodeCull", "rebase", f"pr:{pr_number}"],
+    }
+
+    resp = httpx.post(
+        f"{_api_base()}/sessions",
+        headers=_headers(),
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    session_id = data.get("session_id", "")
+    url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
+
+    logger.info("Created Devin rebase session %s for branch %s (PR #%d)", session_id, branch, pr_number)
+    return {"session_id": session_id, "url": url}
+
+
 def extract_pr_url(session_status: dict) -> str | None:
     """Try to extract a pull request URL from the session result."""
     # The structured_output or result may contain a PR URL
