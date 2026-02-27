@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 
 import httpx
@@ -84,6 +85,38 @@ Instructions:
 """
 
 
+_MAX_RETRIES = 2
+_RETRY_BASE_DELAY = 5  # seconds
+
+
+def _post_with_retry(url: str, headers: dict, json: dict, *, timeout: int = 30) -> httpx.Response:
+    """POST with a short retry on 429 Too Many Requests.
+
+    Only retries a couple of times with short delays to stay within
+    Fly.io's 60 s request timeout when called synchronously.
+    """
+    delay = _RETRY_BASE_DELAY
+    for attempt in range(1, _MAX_RETRIES + 1):
+        resp = httpx.post(url, headers=headers, json=json, timeout=timeout)
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return resp
+        try:
+            retry_after = min(int(resp.headers.get("Retry-After", str(delay))), 15)
+        except (ValueError, TypeError):
+            retry_after = delay
+        logger.warning(
+            "429 rate-limited (attempt %d/%d) — retrying in %ds",
+            attempt, _MAX_RETRIES, retry_after,
+        )
+        time.sleep(retry_after)
+        delay = min(delay * 2, 15)
+    # Final attempt — let the error propagate
+    resp = httpx.post(url, headers=headers, json=json, timeout=timeout)
+    resp.raise_for_status()
+    return resp
+
+
 def create_cleanup_session(
     flag_key: str,
     repo: str,
@@ -93,6 +126,7 @@ def create_cleanup_session(
     """Create a Devin session that removes the given flag.
 
     Returns a dict with 'session_id' and 'url'.
+    Retries automatically on 429 (rate limit) with exponential back-off.
     """
     prompt = _build_prompt(flag_key, repo, variation, files)
 
@@ -102,13 +136,11 @@ def create_cleanup_session(
         "tags": ["CodeCull", f"flag:{flag_key}"],
     }
 
-    resp = httpx.post(
+    resp = _post_with_retry(
         f"{_api_base()}/sessions",
         headers=_headers(),
         json=payload,
-        timeout=30,
     )
-    resp.raise_for_status()
     data = resp.json()
 
     session_id = data.get("session_id", "")
@@ -116,6 +148,81 @@ def create_cleanup_session(
 
     logger.info("Created Devin session %s for flag %s", session_id, flag_key)
     return {"session_id": session_id, "url": url}
+
+
+def stop_session(session_id: str) -> bool:
+    """Stop a Devin session. Returns True if stopped, False on error."""
+    try:
+        resp = httpx.post(
+            f"{_api_base()}/sessions/{session_id}/stop",
+            headers=_headers(),
+            timeout=15,
+        )
+        if resp.status_code < 300:
+            logger.info("Stopped session %s", session_id)
+            return True
+        logger.warning("Failed to stop session %s: %d", session_id, resp.status_code)
+        return False
+    except Exception:
+        logger.exception("Error stopping session %s", session_id)
+        return False
+
+
+def stop_codecull_sessions() -> int:
+    """Stop all running/suspended CodeCull sessions to free up org slots.
+
+    Uses concurrent requests to stay within Fly.io's 60 s timeout.
+    Returns the number of sessions stopped.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    session_ids: list[str] = []
+    for status_filter in ("running", "suspended"):
+        try:
+            resp = httpx.get(
+                f"{_api_base()}/sessions",
+                headers=_headers(),
+                params={"limit": 50, "status": status_filter},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+        except Exception:
+            logger.exception("Failed to list %s sessions", status_filter)
+            continue
+
+        for session in items:
+            tags = session.get("tags") or []
+            title = (session.get("title") or "").lower()
+            # Match by tag OR by title pattern (older sessions lack tags)
+            is_codecull = (
+                "CodeCull" in tags
+                or "remove stale" in title
+                or "stale flag" in title
+                or "stale feature flag" in title
+            )
+            if not is_codecull:
+                continue
+            session_ids.append(session.get("session_id", ""))
+
+    if not session_ids:
+        return 0
+
+    stopped = 0
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(stop_session, sid): sid for sid in session_ids}
+        try:
+            for fut in as_completed(futures, timeout=20):
+                try:
+                    if fut.result():
+                        stopped += 1
+                except Exception:
+                    pass
+        except TimeoutError:
+            logger.warning("Timed out waiting for all session stop requests to complete")
+
+    logger.info("Stopped %d / %d old CodeCull sessions", stopped, len(session_ids))
+    return stopped
 
 
 def get_session_status(session_id: str) -> dict:
@@ -178,13 +285,11 @@ Instructions:
         "tags": ["CodeCull", "rebase", f"pr:{pr_number}"],
     }
 
-    resp = httpx.post(
+    resp = _post_with_retry(
         f"{_api_base()}/sessions",
         headers=_headers(),
         json=payload,
-        timeout=30,
     )
-    resp.raise_for_status()
     data = resp.json()
 
     session_id = data.get("session_id", "")
@@ -204,7 +309,6 @@ def extract_pr_url(session_status: dict) -> str | None:
 
     # Fallback: scan the last message / result text for a GitHub PR URL
     result_text = session_status.get("result", "") or ""
-    import re
     pr_match = re.search(r"https://github\.com/[^\s]+/pull/\d+", result_text)
     if pr_match:
         return pr_match.group(0)

@@ -33,6 +33,7 @@ from scanner.devin_integration import (
     extract_pr_url,
     get_session_status,
     poll_session_until_done,
+    stop_codecull_sessions,
 )
 from scanner.flag_scanner import FlagCandidate, run_scan
 from scanner.github_stats import (
@@ -79,6 +80,8 @@ def _apply_state_to_candidates(candidates: list[FlagCandidate]) -> None:
             c.status = "done"
         elif status in ("running", "in_progress"):
             c.status = "in_progress"
+        elif status == "queued":
+            c.status = "in_progress"  # show spinner for queued too
         elif status in ("error", "finished", "stopped", "blocked"):
             c.status = "error"
         else:
@@ -389,11 +392,16 @@ def _refresh_pr_statuses() -> None:
 
     Also removes error-state sessions (no PR created) so they don't persist
     forever on the dashboard.
+
+    For *queued* sessions (rate-limited during dispatch), automatically
+    attempts to dispatch them once a running session completes or capacity
+    frees up.
     """
     global _candidates, _sessions, _pr_stats
 
     keys_to_remove: list[str] = []
     state_changed = False
+    running_count = sum(1 for s in _sessions.values() if s.get("status") == "running")
 
     for flag_key, session in list(_sessions.items()):
         pr_url = session.get("pr_url")
@@ -403,6 +411,10 @@ def _refresh_pr_statuses() -> None:
             status = session.get("status", "")
             sid = session.get("session_id")
 
+            # Skip queued sessions — handled in the auto-dispatch pass below
+            if status == "queued":
+                continue
+
             # If session is still running, poll Devin for completion
             if sid and status == "running":
                 try:
@@ -410,6 +422,7 @@ def _refresh_pr_statuses() -> None:
                     state = devin_status.get("status_enum", "unknown")
 
                     if state in ("finished", "stopped", "blocked"):
+                        running_count -= 1
                         found_pr = extract_pr_url(devin_status)
                         if found_pr:
                             session["pr_url"] = found_pr
@@ -450,6 +463,37 @@ def _refresh_pr_statuses() -> None:
 
         _candidates = [c for c in _candidates if c.flag_key not in keys_to_remove]
         state_changed = True
+
+    # Auto-dispatch queued sessions now that capacity may have freed up
+    queued = [(k, s) for k, s in _sessions.items() if s.get("status") == "queued"]
+    if queued:
+        repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+        for flag_key, session in queued:
+            candidate = _find_candidate(flag_key)
+            if not candidate:
+                continue
+            try:
+                result = create_cleanup_session(
+                    flag_key=candidate.flag_key,
+                    repo=repo_slug,
+                    variation=candidate.variation_served,
+                    files=candidate.files_affected,
+                )
+                _sessions[flag_key] = {
+                    "session_id": result["session_id"],
+                    "url": result["url"],
+                    "status": "running",
+                    "pr_url": None,
+                }
+                state_changed = True
+                logger.info("%s: auto-dispatched queued session: %s", flag_key, result["url"])
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    logger.info("%s: still rate-limited, staying queued", flag_key)
+                else:
+                    logger.exception("Failed to auto-dispatch %s", flag_key)
+            except Exception:
+                logger.exception("Failed to auto-dispatch %s", flag_key)
 
     if state_changed:
         # Re-apply statuses and persist
@@ -704,14 +748,14 @@ _reset_lock = threading.Lock()
 
 @app.post("/api/reset-demo")
 def api_reset_demo(request: Request):
-    """Reset the demo to its initial state (synchronous).
+    """Reset the demo to its initial state (synchronous, fast).
 
-    Restores LogiOps source files, re-creates stale flags in Unleash,
-    closes open cleanup PRs, and clears the dashboard state.
+    Phase 1: Restores LogiOps source files, re-creates stale flags in
+    Unleash, closes open cleanup PRs, and clears the dashboard state.
+    Completes in ~6 s.
 
-    Runs synchronously (~10-15 s) so the response contains the full
-    result.  This avoids Fly.io machine-suspend issues that caused
-    background-thread state to be lost between requests.
+    The client should follow up with ``POST /api/reset-demo/dispatch``
+    to stop old sessions and dispatch new Devin cleanup sessions.
     """
     _check_auth(request)
 
@@ -736,64 +780,8 @@ def api_reset_demo(request: Request):
         _last_scan_time = datetime.now(timezone.utc)
         _apply_state_to_candidates(_candidates)
 
-        logger.info("Demo reset completed successfully")
-
-        # Dispatch Devin cleanup sessions synchronously (fast, ~2-3s each).
-        # We do NOT poll — the dashboard auto-refreshes for in-progress cards.
-        # This survives Fly.io machine suspension because state is persisted.
-        repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
-        dispatch_results: list[dict] = []
-
-        # Check for existing cleanup PRs first (avoid duplicate Devin sessions)
-        flag_keys = [c.flag_key for c in _candidates]
-        existing_prs: dict[str, dict] = {}
-        try:
-            existing_prs = discover_cleanup_prs(repo_slug, flag_keys)
-        except Exception:
-            logger.exception("Failed to discover existing cleanup PRs")
-
-        for c in _candidates:
-            existing = existing_prs.get(c.flag_key, {})
-            if existing.get("pr_url"):
-                _sessions[c.flag_key] = {
-                    "status": "ready",
-                    "pr_url": existing["pr_url"],
-                }
-                dispatch_results.append({"flag": c.flag_key, "action": "existing_pr"})
-                logger.info("%s: existing PR found, skipping dispatch", c.flag_key)
-                continue
-
-            try:
-                result = create_cleanup_session(
-                    flag_key=c.flag_key,
-                    repo=repo_slug,
-                    variation=c.variation_served,
-                    files=c.files_affected,
-                )
-                _sessions[c.flag_key] = {
-                    "session_id": result["session_id"],
-                    "url": result["url"],
-                    "status": "running",
-                    "pr_url": None,
-                }
-                dispatch_results.append({
-                    "flag": c.flag_key,
-                    "action": "dispatched",
-                    "session_url": result["url"],
-                })
-                logger.info("%s: Devin session dispatched: %s", c.flag_key, result["url"])
-            except Exception:
-                logger.exception("Failed to dispatch Devin for %s", c.flag_key)
-                dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed"})
-
-        # Apply session state to candidates so the page shows correct statuses
-        _apply_state_to_candidates(_candidates)
-
-        # Persist sessions so state survives machine restarts
-        save_state(_STATE_PATH, _sessions, _pr_stats)
-
-        results["dispatch"] = dispatch_results
-        return {"status": "done", "results": results}
+        logger.info("Demo reset completed successfully — %d candidates", len(_candidates))
+        return {"status": "done", "results": results, "candidates": len(_candidates)}
     except Exception as exc:
         logger.exception("Demo reset failed")
         return JSONResponse(
@@ -802,3 +790,101 @@ def api_reset_demo(request: Request):
         )
     finally:
         _reset_lock.release()
+
+
+@app.post("/api/reset-demo/dispatch")
+def api_reset_demo_dispatch(request: Request):
+    """Dispatch Devin cleanup sessions after a reset (Phase 2).
+
+    Stops old CodeCull sessions to free up org slots, then dispatches
+    a new Devin session for each stale-flag candidate.  Each dispatch
+    is fast (~2-3 s) but stopping old sessions can take 10-20 s, so
+    the total may be up to ~30 s.  Results are persisted to the state
+    file so the dashboard survives Fly.io machine restarts.
+    """
+    _check_auth(request)
+
+    global _candidates, _sessions, _pr_stats
+
+    if not _candidates:
+        return {"status": "no_candidates", "message": "Run /api/reset-demo first."}
+
+    # Stop old CodeCull sessions to free up org session slots
+    stopped = 0
+    try:
+        stopped = stop_codecull_sessions()
+        logger.info("Stopped %d old CodeCull sessions before dispatching", stopped)
+    except Exception:
+        logger.exception("Failed to stop old sessions (continuing anyway)")
+
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    dispatch_results: list[dict] = []
+
+    # Check for existing cleanup PRs first (avoid duplicate Devin sessions)
+    flag_keys = [c.flag_key for c in _candidates]
+    existing_prs: dict[str, dict] = {}
+    try:
+        existing_prs = discover_cleanup_prs(repo_slug, flag_keys)
+    except Exception:
+        logger.exception("Failed to discover existing cleanup PRs")
+
+    dispatched_count = 0
+    for c in _candidates:
+        existing = existing_prs.get(c.flag_key, {})
+        if existing.get("pr_url"):
+            _sessions[c.flag_key] = {
+                "status": "ready",
+                "pr_url": existing["pr_url"],
+            }
+            dispatch_results.append({"flag": c.flag_key, "action": "existing_pr"})
+            logger.info("%s: existing PR found, skipping dispatch", c.flag_key)
+            continue
+
+        # Small delay between dispatches to avoid hammering the API
+        if dispatched_count > 0:
+            time.sleep(2)
+
+        try:
+            result = create_cleanup_session(
+                flag_key=c.flag_key,
+                repo=repo_slug,
+                variation=c.variation_served,
+                files=c.files_affected,
+            )
+            _sessions[c.flag_key] = {
+                "session_id": result["session_id"],
+                "url": result["url"],
+                "status": "running",
+                "pr_url": None,
+            }
+            dispatch_results.append({
+                "flag": c.flag_key,
+                "action": "dispatched",
+                "session_url": result["url"],
+            })
+            dispatched_count += 1
+            logger.info("%s: Devin session dispatched: %s", c.flag_key, result["url"])
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                # Rate limited — queue for auto-dispatch on next refresh
+                _sessions[c.flag_key] = {"status": "queued"}
+                dispatch_results.append({"flag": c.flag_key, "action": "queued"})
+                logger.warning("%s: 429 rate-limited, queued for later dispatch", c.flag_key)
+            else:
+                logger.exception("Failed to dispatch Devin for %s", c.flag_key)
+                dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})
+        except Exception as exc:
+            logger.exception("Failed to dispatch Devin for %s", c.flag_key)
+            dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})
+
+    # Apply session state to candidates so the page shows correct statuses
+    _apply_state_to_candidates(_candidates)
+
+    # Persist sessions so state survives machine restarts
+    save_state(_STATE_PATH, _sessions, _pr_stats)
+
+    return {
+        "status": "done",
+        "sessions_stopped": stopped,
+        "dispatch": dispatch_results,
+    }
