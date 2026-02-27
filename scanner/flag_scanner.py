@@ -114,9 +114,9 @@ def scan_codebase(repo_path: str, extensions: tuple[str, ...] = (".py",)) -> dic
 # Flag service readers (Unleash or mock JSON fallback)
 # ---------------------------------------------------------------------------
 
-def load_ld_flags(ld_data_path: str) -> dict:
-    """Load the mock LaunchDarkly JSON and return a dict keyed by flag key."""
-    with open(ld_data_path, encoding="utf-8") as fh:
+def load_mock_flags(mock_data_path: str) -> dict:
+    """Load mock flag JSON and return a dict keyed by flag key."""
+    with open(mock_data_path, encoding="utf-8") as fh:
         data = json.load(fh)
     return {f["key"]: f for f in data["flags"]}
 
@@ -135,7 +135,7 @@ def _unleash_basic_auth() -> tuple[str, str] | None:
 
 
 def load_unleash_flags(base_url: str, environment: str = "production") -> dict:
-    """Fetch flags from Unleash Admin API and normalise to the LD-like schema.
+    """Fetch flags from Unleash Admin API and normalise to CodeCull's internal schema.
 
     Returns a dict keyed by flag name (key) with the same shape the
     ``analyse_flags`` function expects, so the rest of the pipeline is
@@ -192,7 +192,7 @@ def load_unleash_flags(base_url: str, environment: str = "production") -> dict:
                     is_rollout = True
                     rollout_pct = pct
 
-        # Build the LD-like structure
+        # Build the CodeCull-compatible structure
         if enabled:
             variation_served = 0  # True / Enabled
         else:
@@ -244,9 +244,9 @@ def _days_since(iso_date: str | None) -> int | None:
 
 def analyse_flags(
     code_flags: dict[str, list[FlagOccurrence]],
-    ld_flags: dict,
+    flag_data: dict,
 ) -> list[FlagCandidate]:
-    """Cross-reference code usage with LD metadata and return stale candidates.
+    """Cross-reference code usage with flag service metadata and return stale candidates.
 
     A flag is stale when:
       1. It appears in the codebase.
@@ -258,15 +258,15 @@ def analyse_flags(
     candidates: list[FlagCandidate] = []
 
     for flag_key, occurrences in code_flags.items():
-        ld = ld_flags.get(flag_key)
-        if ld is None:
-            continue  # flag not known to LD — skip
+        flag = flag_data.get(flag_key)
+        if flag is None:
+            continue  # unknown flag — skip
 
         # Skip active percentage rollouts
-        if ld.get("percentage_rollout") is not None:
+        if flag.get("percentage_rollout") is not None:
             continue
 
-        prod = ld.get("environments", {}).get("production", {})
+        prod = flag.get("environments", {}).get("production", {})
         variation_served = prod.get("variation_served")
         served_since = prod.get("variation_served_since")
 
@@ -278,7 +278,7 @@ def analyse_flags(
             continue
 
         # Determine human-readable variation label
-        variations = ld.get("variations", [])
+        variations = flag.get("variations", [])
         if variation_served < len(variations):
             val = variations[variation_served]["value"]
             variation_label = "always-on" if val is True else "always-off"
@@ -291,16 +291,16 @@ def analyse_flags(
         candidates.append(
             FlagCandidate(
                 flag_key=flag_key,
-                flag_name=ld.get("name", flag_key),
-                description=ld.get("description", ""),
+                flag_name=flag.get("name", flag_key),
+                description=flag.get("description", ""),
                 variation_served=variation_label,
                 days_stale=days,
                 files_affected=files,
                 total_lines=total_lines,
                 occurrences=occurrences,
-                tags=ld.get("tags", []),
-                maintainer_email=ld.get("maintainer_email", ""),
-                maintainer_name=ld.get("maintainer_name", ""),
+                tags=flag.get("tags", []),
+                maintainer_email=flag.get("maintainer_email", ""),
+                maintainer_name=flag.get("maintainer_name", ""),
             )
         )
 
@@ -435,12 +435,12 @@ def get_target_repo_path() -> str:
 
 def run_scan(
     repo_path: str | None = None,
-    ld_data_path: str | None = None,
+    mock_data_path: str | None = None,
 ) -> list[FlagCandidate]:
     """Run a full scan and return stale flag candidates.
 
     Uses Unleash Admin API when ``UNLEASH_URL`` is set, otherwise falls
-    back to the mock LaunchDarkly JSON file.
+    back to a local mock JSON file.
     """
     repo_path = repo_path or get_target_repo_path()
 
@@ -448,8 +448,13 @@ def run_scan(
     if unleash_url:
         flag_data = load_unleash_flags(unleash_url)
     else:
-        ld_data_path = ld_data_path or os.getenv("MOCK_LD_DATA_PATH", "./mock_launchdarkly.json")
-        flag_data = load_ld_flags(ld_data_path)
+        mock_data_path = (
+            mock_data_path
+            or os.getenv("MOCK_FLAG_DATA_PATH")
+            or os.getenv("MOCK_LD_DATA_PATH")
+            or "./mock_flags.json"
+        )
+        flag_data = load_mock_flags(mock_data_path)
 
     code_flags = scan_codebase(repo_path)
     return analyse_flags(code_flags, flag_data)

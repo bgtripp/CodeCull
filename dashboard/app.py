@@ -63,6 +63,12 @@ _last_scan_time: datetime | None = None
 # Stacked session tracking: session_id -> {flag_keys, notified}
 _stacked_sessions: dict[str, dict] = {}
 
+# Background poller shutdown event
+_bg_poller_stop = threading.Event()
+
+# Prevent concurrent state refreshes (background poller vs web requests)
+_refresh_lock = threading.Lock()
+
 
 _STATE_PATH = Path(os.getenv("CODECULL_STATE_PATH", str(_PROJECT_ROOT / ".codecull_state.json")))
 
@@ -126,7 +132,16 @@ async def lifespan(app: FastAPI):
         len(_pr_stats),
     )
 
+    # Start background poller so Slack notifications fire even when
+    # nobody is actively viewing the dashboard.
+    _bg_poller_stop.clear()
+    poller = threading.Thread(target=_background_session_poller, daemon=True)
+    poller.start()
+
     yield
+
+    # Signal the poller to stop on shutdown
+    _bg_poller_stop.set()
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +153,13 @@ app = FastAPI(title="CodeCull Dashboard", lifespan=lifespan)
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+@app.get("/health")
+async def health():
+    """Lightweight health-check used by the keepalive self-ping."""
+    return {"status": "ok"}
+
 
 # ---------------------------------------------------------------------------
 # Email OTP Auth
@@ -340,7 +362,8 @@ def index(request: Request):
     if not email:
         return RedirectResponse(url="/auth/login", status_code=303)
 
-    _refresh_pr_statuses()
+    with _refresh_lock:
+        _refresh_pr_statuses()
 
     return templates.TemplateResponse(
         "index.html",
@@ -373,6 +396,41 @@ async def flag_status(request: Request, flag_key: str):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Background session poller: periodically refresh PR / Devin session status
+# so Phase 2 Slack notifications fire even if nobody refreshes the dashboard.
+_BG_POLL_INTERVAL = int(os.getenv("BG_POLL_INTERVAL", "30"))  # seconds
+
+
+def _keepalive_ping() -> None:
+    """Hit our own public URL so Fly.io sees HTTP traffic and won't auto-suspend."""
+    dashboard_url = os.getenv("DASHBOARD_URL", "")
+    if not dashboard_url:
+        return
+    try:
+        httpx.get(f"{dashboard_url.rstrip('/')}/health", timeout=10)
+        logger.debug("Keepalive ping sent to %s/health", dashboard_url)
+    except Exception:
+        logger.debug("Keepalive ping failed (non-critical)")
+
+
+def _background_session_poller() -> None:
+    logger.info("Background session poller started (interval=%ds)", _BG_POLL_INTERVAL)
+    while not _bg_poller_stop.is_set():
+        try:
+            with _refresh_lock:
+                has_running = any(s.get("status") == "running" for s in _sessions.values())
+                has_unnotified = any(not st.get("notified") for st in _stacked_sessions.values())
+                if has_running or has_unnotified:
+                    _refresh_pr_statuses()
+            if has_running or has_unnotified:
+                # Keep Fly machine alive while work is pending
+                _keepalive_ping()
+        except Exception:
+            logger.exception("Background poller: error while refreshing PR statuses")
+        _bg_poller_stop.wait(_BG_POLL_INTERVAL)
+    logger.info("Background session poller stopped")
+
 
 def _match_prs_to_flags(
     pr_urls: list[str],
@@ -425,6 +483,7 @@ def _refresh_pr_statuses() -> None:
     global _candidates, _sessions, _pr_stats
 
     keys_to_remove: list[str] = []
+    _flags_to_archive: list[str] = []
     state_changed = False
 
     # Deduplicate session IDs to avoid polling the same stacked session N times
@@ -453,6 +512,10 @@ def _refresh_pr_statuses() -> None:
 
                 state_val = devin_status.get("status_enum") or devin_status.get("status", "unknown")
                 is_terminal = state_val in ("finished", "stopped", "blocked", "suspended")
+                # Devin is "done creating PRs" if it's terminal OR waiting
+                # for user input (e.g. awaiting_instructions).  Basically
+                # anything other than actively running.
+                done_creating = state_val != "running"
 
                 # Check for PRs even while running — Devin can create PRs before the session ends
                 all_pr_urls = extract_all_pr_urls(devin_status)
@@ -494,8 +557,13 @@ def _refresh_pr_statuses() -> None:
                                         if pr_st is not None:
                                             _pr_stats[fk] = pr_st
 
-                            # Send Phase 2 Slack notification once all expected PRs are ready
-                            if not stacked.get("notified") and len(all_pr_urls) >= len(stacked_keys):
+                            # Send Phase 2 Slack notification when:
+                            # - All expected PRs are ready, OR
+                            # - Session is no longer actively running (terminal,
+                            #   awaiting_instructions, etc.) — Devin won't
+                            #   create more PRs without user action.
+                            all_covered = len(all_pr_urls) >= len(stacked_keys)
+                            if not stacked.get("notified") and (all_covered or done_creating):
                                 sent = _send_phase2_notification(stacked, all_pr_urls)
                                 if sent:
                                     stacked["notified"] = True
@@ -539,6 +607,13 @@ def _refresh_pr_statuses() -> None:
             logger.info("PR for %s is %s — removing from queue", flag_key,
                         "merged" if stats.get("merged") else "closed")
             keys_to_remove.append(flag_key)
+            # Archive the flag in Unleash when the cleanup PR is merged
+            if stats.get("merged"):
+                _flags_to_archive.append(flag_key)
+
+    # Archive merged flags in Unleash before removing them from state
+    if _flags_to_archive:
+        _archive_unleash_flags(_flags_to_archive)
 
     if keys_to_remove:
         for key in keys_to_remove:
@@ -550,25 +625,58 @@ def _refresh_pr_statuses() -> None:
 
     # Catch-up: send Slack notifications for stacked sessions where all flags
     # already have pr_url set but notification was never sent (e.g. PRs were
-    # matched on a previous deployment that didn't have this notification fix).
+    # matched on a previous deployment that didn't have this notification fix,
+    # or Devin created fewer PRs than flags so the count guard blocked it).
     for sid, stacked in _stacked_sessions.items():
         if stacked.get("notified"):
             continue
         stacked_keys = stacked.get("flag_keys", [])
         pr_urls_for_stack: list[str] = []
+        all_flags_have_url = True
         for fk in stacked_keys:
             fk_session = _sessions.get(fk)
             if fk_session and fk_session.get("pr_url"):
                 pr_urls_for_stack.append(fk_session["pr_url"])
-        # Deduplicate — fallback URLs may have been assigned for unmatched
-        # flags; only notify when we have enough *distinct* PRs.
+            else:
+                all_flags_have_url = False
         unique_pr_urls = list(dict.fromkeys(pr_urls_for_stack))
-        if len(unique_pr_urls) >= len(stacked_keys) and unique_pr_urls:
+        if not unique_pr_urls:
+            # If none of the flags exist in _sessions anymore (all merged/removed),
+            # mark as notified so the background poller stops retrying forever.
+            if not any(fk in _sessions for fk in stacked_keys):
+                stacked["notified"] = True
+                state_changed = True
+                logger.info("Orphaned stacked session %s — all flags removed, marking notified", sid)
+            continue
+        # Notify when all flags covered with distinct PRs, OR when all
+        # flags have *some* URL and the Devin session is no longer running
+        # (i.e. no more PRs are expected).
+        all_covered = len(unique_pr_urls) >= len(stacked_keys)
+        if all_covered:
             logger.info("Catch-up: sending Phase 2 Slack for stacked session %s", sid)
             sent = _send_phase2_notification(stacked, unique_pr_urls)
             if sent:
                 stacked["notified"] = True
                 state_changed = True
+        elif all_flags_have_url:
+            # All flags have a URL (possibly fallback duplicates).
+            # Check if the Devin session is done — if so, send with what we have.
+            try:
+                devin_status = get_session_status(sid)
+                sv = devin_status.get("status_enum") or devin_status.get("status", "")
+                session_done = sv != "running"
+            except Exception:
+                # Can't reach Devin — assume session is done (old session)
+                session_done = True
+            if session_done:
+                logger.info(
+                    "Catch-up (partial): sending Phase 2 Slack for stacked session %s "
+                    "(%d unique PRs for %d flags)", sid, len(unique_pr_urls), len(stacked_keys),
+                )
+                sent = _send_phase2_notification(stacked, unique_pr_urls)
+                if sent:
+                    stacked["notified"] = True
+                    state_changed = True
 
     if state_changed:
         # Re-apply statuses and persist
@@ -596,6 +704,26 @@ def _send_phase2_notification(stacked: dict, pr_urls: list[str]) -> bool:
                 break
 
     if not maintainer_email:
+        # Fall back to git blame on the first affected file (same as Phase 1).
+        try:
+            from scanner.flag_scanner import get_target_repo_path
+            from scanner.slack_notify import find_flag_author_email
+
+            for fk in flag_keys:
+                c = _find_candidate(fk)
+                if not c:
+                    continue
+                first_file = c.files_affected[0] if c.files_affected else ""
+                if not first_file:
+                    continue
+                maintainer_email = find_flag_author_email(get_target_repo_path(), first_file, fk) or ""
+                if maintainer_email:
+                    logger.info("Phase 2: using git blame author: %s", maintainer_email)
+                    break
+        except Exception:
+            logger.exception("Phase 2: git blame email resolution failed")
+
+    if not maintainer_email:
         maintainer_email = os.getenv("SLACK_NOTIFY_EMAIL", "")
 
     if not maintainer_email:
@@ -613,6 +741,54 @@ def _send_phase2_notification(stacked: dict, pr_urls: list[str]) -> bool:
     except Exception:
         logger.exception("Failed to send Phase 2 Slack notification")
         return False
+
+
+def _archive_unleash_flags(flag_keys: list[str]) -> None:
+    """Archive the given feature flags in Unleash after their cleanup PRs merge.
+
+    Uses the Unleash Admin API bulk-archive endpoint:
+    ``POST /api/admin/projects/:projectId/archive``
+    with body ``{"features": ["flag-a", "flag-b", ...]}``.
+
+    Silently ignores errors (already archived, missing, etc.) so the
+    dashboard refresh is never blocked by Unleash issues.
+    """
+    unleash_url = os.getenv("UNLEASH_URL", "")
+    if not unleash_url:
+        return
+
+    project = os.getenv("UNLEASH_PROJECT", "default")
+    api_token = os.getenv("UNLEASH_ADMIN_TOKEN", "")
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    auth = None
+
+    if api_token:
+        headers["Authorization"] = api_token
+    else:
+        user = os.getenv("UNLEASH_ADMIN_USER", "")
+        password = os.getenv("UNLEASH_ADMIN_PASSWORD", "")
+        if user and password:
+            auth = (user, password)
+
+    url = f"{unleash_url}/api/admin/projects/{project}/archive"
+    try:
+        resp = httpx.post(
+            url,
+            headers=headers,
+            auth=auth,
+            json={"features": flag_keys},
+            timeout=15,
+        )
+        if resp.status_code < 300:
+            logger.info("Archived %d flag(s) in Unleash: %s", len(flag_keys), flag_keys)
+        else:
+            logger.warning(
+                "Unleash archive returned %d: %s",
+                resp.status_code,
+                resp.text[:200],
+            )
+    except Exception:
+        logger.exception("Failed to archive flags in Unleash: %s", flag_keys)
 
 
 def _find_candidate(flag_key: str) -> FlagCandidate | None:
@@ -663,11 +839,14 @@ def api_fix_selected(request: Request, flag_keys: list[str] = Body(..., embed=Tr
         if not maintainer_email and candidate.maintainer_email:
             maintainer_email = candidate.maintainer_email
 
-    # Dispatch the stacked Devin session
+    # Dispatch the stacked Devin session (with callback so Devin notifies us)
+    dashboard_url = os.getenv("DASHBOARD_URL", "").rstrip("/")
     try:
         result = create_stacked_cleanup_session(
             flags=flags_for_prompt,
             repo=repo_slug,
+            callback_url=dashboard_url,
+            callback_token=_SYNC_API_TOKEN,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
@@ -680,24 +859,25 @@ def api_fix_selected(request: Request, flag_keys: list[str] = Body(..., embed=Tr
     session_id = result["session_id"]
     session_url = result["url"]
 
-    # Register the stacked session
-    _stacked_sessions[session_id] = {
-        "flag_keys": flag_keys,
-        "maintainer_email": maintainer_email,
-        "notified": False,
-    }
-
-    # Point all selected flags to this session
-    for fk in flag_keys:
-        _sessions[fk] = {
-            "session_id": session_id,
-            "url": session_url,
-            "status": "running",
-            "pr_url": None,
+    # Register the stacked session (under lock to avoid racing the poller)
+    with _refresh_lock:
+        _stacked_sessions[session_id] = {
+            "flag_keys": flag_keys,
+            "maintainer_email": maintainer_email,
+            "notified": False,
         }
 
-    _apply_state_to_candidates(_candidates)
-    save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
+        # Point all selected flags to this session
+        for fk in flag_keys:
+            _sessions[fk] = {
+                "session_id": session_id,
+                "url": session_url,
+                "status": "running",
+                "pr_url": None,
+            }
+
+        _apply_state_to_candidates(_candidates)
+        save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
 
     logger.info(
         "Dispatched stacked Devin session %s for %d flags: %s",
@@ -728,20 +908,22 @@ def _run_sync_background() -> None:
     try:
         sync_state(state_path=_STATE_PATH)
         # Reload dashboard in-memory state from the updated file
-        _candidates = run_scan()
-        _last_scan_time = datetime.now(timezone.utc)
+        new_candidates = run_scan()
         state = load_state(_STATE_PATH)
-        _sessions = state.get("sessions", {}) or {}
-        _pr_stats = state.get("pr_stats", {}) or {}
-        _stacked_sessions = state.get("stacked_sessions", {}) or {}
-        _apply_state_to_candidates(_candidates)
-        _candidates.sort(
-            key=lambda c: (
-                _pr_stats.get(c.flag_key, {}).get("deletions", 0),
-                c.days_stale,
-            ),
-            reverse=True,
-        )
+        with _refresh_lock:
+            _candidates = new_candidates
+            _last_scan_time = datetime.now(timezone.utc)
+            _sessions = state.get("sessions", {}) or {}
+            _pr_stats = state.get("pr_stats", {}) or {}
+            _stacked_sessions = state.get("stacked_sessions", {}) or {}
+            _apply_state_to_candidates(_candidates)
+            _candidates.sort(
+                key=lambda c: (
+                    _pr_stats.get(c.flag_key, {}).get("deletions", 0),
+                    c.days_stale,
+                ),
+                reverse=True,
+            )
         _sync_status["result"] = {
             "prs_ready": sum(1 for s in _sessions.values() if s.get("pr_url")),
             "candidates": len(_candidates),
@@ -804,6 +986,74 @@ def api_sync_status(request: Request):
         else:
             raise HTTPException(status_code=401, detail="Not authenticated")
     return _sync_status
+
+
+# ---------------------------------------------------------------------------
+# Session-complete callback (called by Devin when all PRs are created)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/session-complete")
+def api_session_complete(request: Request):
+    """Callback fired by the Devin session after it creates all stacked PRs.
+
+    Triggers ``_refresh_pr_statuses()`` which matches PRs to flags, sends the
+    Phase 2 Slack notification, and archives flags.  This is the primary
+    mechanism for delivering the Slack DM — the background poller serves only
+    as a safety-net fallback.
+
+    Because Devin is still technically "running" when it executes the curl
+    callback (the curl IS the session's last step), the normal ``done_creating``
+    guard inside ``_refresh_pr_statuses()`` may prevent the notification from
+    firing.  After the refresh we do a second pass: for every unnotified
+    stacked session that has *any* PR URLs, we force-send the notification
+    since the callback is the definitive "I'm done" signal.
+
+    Auth: Bearer ``SYNC_API_TOKEN``.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not _SYNC_API_TOKEN or auth_header != f"Bearer {_SYNC_API_TOKEN}":
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    notified_count = 0
+
+    with _refresh_lock:
+        _refresh_pr_statuses()
+
+        # Force-send any pending notifications — the callback means Devin is
+        # done, even if the Devin API still reports the session as "running".
+        state_changed = False
+        for sid, stacked in _stacked_sessions.items():
+            if stacked.get("notified"):
+                continue
+            stacked_keys = stacked.get("flag_keys", [])
+            pr_urls: list[str] = []
+            for fk in stacked_keys:
+                fk_session = _sessions.get(fk)
+                if fk_session and fk_session.get("pr_url"):
+                    pr_urls.append(fk_session["pr_url"])
+            unique_urls = list(dict.fromkeys(pr_urls))
+            if unique_urls:
+                logger.info(
+                    "session-complete: force-sending Phase 2 for session %s "
+                    "(%d PRs for %d flags)",
+                    sid, len(unique_urls), len(stacked_keys),
+                )
+                sent = _send_phase2_notification(stacked, unique_urls)
+                if sent:
+                    stacked["notified"] = True
+                    state_changed = True
+                    notified_count += 1
+
+        if state_changed:
+            _apply_state_to_candidates(_candidates)
+            save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
+
+    logger.info(
+        "Session-complete callback: refresh done, %d notification(s) sent",
+        notified_count,
+    )
+    return {"status": "ok", "message": "Refresh triggered", "notified": notified_count}
 
 
 # ---------------------------------------------------------------------------
@@ -973,17 +1223,17 @@ def api_reset_demo(request: Request):
     try:
         results = run_demo_reset()
 
-        # Clear all dashboard state
-        _sessions.clear()
-        _pr_stats.clear()
-        _stacked_sessions.clear()
-        _candidates = []
-        save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
+        # Clear all dashboard state (under lock to avoid racing the poller)
+        with _refresh_lock:
+            _sessions.clear()
+            _pr_stats.clear()
+            _stacked_sessions.clear()
+            _candidates = []
+            save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
 
         # Re-scan to pick up restored flags
-        _candidates = run_scan()
+        new_candidates = run_scan()
         _last_scan_time = datetime.now(timezone.utc)
-        _apply_state_to_candidates(_candidates)
 
         # Send Phase 1 Slack notification (non-blocking)
         try:
@@ -993,9 +1243,11 @@ def api_reset_demo(request: Request):
 
         # Reload state after sync (sync may have found existing PRs)
         state = load_state(_STATE_PATH)
-        _sessions.update(state.get("sessions", {}))
-        _pr_stats.update(state.get("pr_stats", {}))
-        _apply_state_to_candidates(_candidates)
+        with _refresh_lock:
+            _candidates = new_candidates
+            _sessions.update(state.get("sessions", {}))
+            _pr_stats.update(state.get("pr_stats", {}))
+            _apply_state_to_candidates(_candidates)
 
         logger.info("Demo reset completed successfully — %d candidates", len(_candidates))
         return {"status": "done", "results": results, "candidates": len(_candidates)}

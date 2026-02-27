@@ -1,19 +1,19 @@
 # CodeCull
 
-Automated stale feature flag cleanup. Scans your codebase for feature flags, cross-references LaunchDarkly (or a mock), identifies flags that have been always-on or always-off for 90+ days, and dispatches [Devin](https://devin.ai) to remove them — one draft PR per flag.
+Automated stale feature flag cleanup. Scans your codebase for feature flags, cross-references Unleash (or a mock JSON file), identifies flags that have been always-on or always-off for 90+ days, and dispatches [Devin](https://devin.ai) to remove them — as a stacked PR chain.
 
 ## How it works
 
 ```
 Sync job  ──▶  Scanner  ──▶  Devin API  ──▶  Draft PRs  ──▶  Slack DM  ──▶  Dashboard
  (cron /        (code +       (cleanup       (one per        ("3 PRs        (review hub,
-  manual)        LD data)      sessions)      flag)           ready")        click → PR)
+  manual)        flag data)    sessions)      flag)           ready")        click → PR)
 ```
 
-1. **Sync job** (`poetry run python main.py sync`) scans the target repo for stale flags, checks GitHub for existing cleanup PRs, dispatches Devin for any flags that don't have PRs yet, and sends a Slack DM when PRs are ready.
-2. **Devin** creates a draft PR per flag — removes the flag check, cleans up dead code paths, updates tests. Sessions are tagged `CodeCull` for easy search in the Devin UI.
-3. **Slack notification** — DMs the engineer: *"CodeCull found N PRs ready for review"* with a link to the dashboard.
-4. **Dashboard** (FastAPI + Jinja2) is the review hub. Cards show flag name, staleness, impact (lines removed, files changed), and a **Review PR** button linking directly to the GitHub PR. Merged or closed PRs are automatically removed on page refresh.
+1. **Sync job** (`poetry run python main.py sync`) scans the target repo for stale flags, checks GitHub for any existing cleanup PRs, writes `.codecull_state.json`, and sends a Slack DM (Phase 1) linking to the dashboard.
+2. **Dashboard** (FastAPI + Jinja2) is the review hub. Select flags and click **Fix in Stacked PR** to dispatch Devin.
+3. **Devin** creates a stacked PR chain — one draft PR per flag, each branching off the previous.
+4. **Slack notification** — DMs the engineer again (Phase 2) when the PRs are ready for review.
 
 ## Demo flow (local)
 
@@ -123,7 +123,7 @@ poetry run python main.py
 | `DASHBOARD_URL` | No | URL included in Slack DM (default: `http://localhost:8000`) |
 | `TARGET_REPO` | No | GitHub repo in `owner/repo` format (default: `bgtripp/LogiOps`) |
 | `TARGET_REPO_PATH` | No | Local path to target repo (skips git clone if set) |
-| `MOCK_LD_DATA_PATH` | No | Path to mock LaunchDarkly JSON (default: `./mock_launchdarkly.json`) |
+| `MOCK_FLAG_DATA_PATH` | No | Path to mock flag JSON (default: `./mock_flags.json`). For backwards compat, `MOCK_LD_DATA_PATH` is still supported. |
 
 ## Target repo
 
@@ -142,11 +142,11 @@ CodeCull scans an external repo — [`bgtripp/LogiOps`](https://github.com/bgtri
 ```
 CodeCull/
 ├── main.py                    # Entry point (dashboard, scan, or sync)
-├── mock_launchdarkly.json     # Mock LD flag data
+├── mock_flags.json            # Mock flag data (used when UNLEASH_URL is not set)
 ├── .codecull_state.json       # Generated — PR state for dashboard (git-ignored)
 ├── scanner/
 │   ├── flag_scanner.py        # Code scanner + staleness analysis + repo cloning
-│   ├── pr_sync.py             # Sync job: scan → discover PRs → dispatch Devin → Slack
+│   ├── pr_sync.py             # Sync job: scan → discover PRs → persist state → Slack (Phase 1)
 │   ├── github_stats.py        # GitHub API: fetch PR stats, discover cleanup PRs
 │   ├── state_store.py         # Read/write .codecull_state.json
 │   ├── devin_integration.py   # Devin API session management (tagged "CodeCull")
