@@ -16,12 +16,28 @@
         {% endif %}
     </div>
     <div class="toolbar-right">
+        {% if maintainer_emails|length > 0 %}
+        <div class="filter-group">
+            <label for="maintainer-filter" class="filter-label">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            </label>
+            <select id="maintainer-filter" class="filter-select" data-user-email="{{ user_email }}">
+                <option value="__mine__">My flags</option>
+                <option value="__all__">All maintainers</option>
+                {% for m in maintainer_emails %}
+                {% if m != user_email %}
+                <option value="{{ m }}">{{ m.split('@')[0] | replace('.', ' ') | title }}</option>
+                {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
         {% if ready %}
-        <span class="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready</span>
+        <span class="candidate-count" id="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready</span>
         {% elif in_progress %}
-        <span class="candidate-count">Devin working&hellip;</span>
+        <span class="candidate-count" id="candidate-count">Devin working&hellip;</span>
         {% elif pending %}
-        <span class="candidate-count">{{ pending|length }} flag{{ 's' if pending|length != 1 }} to review</span>
+        <span class="candidate-count" id="candidate-count">{{ pending|length }} flag{{ 's' if pending|length != 1 }} to review</span>
         {% endif %}
         <button id="reset-demo-btn" class="btn btn-reset" title="Reset LogiOps to pre-cleanup state for re-demoing">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
@@ -47,7 +63,7 @@
 
 <div class="card-list">
 {% for c in visible %}
-    <div class="card card--{{ c.status }}" data-flag="{{ c.flag_key }}">
+    <div class="card card--{{ c.status }}" data-flag="{{ c.flag_key }}" data-maintainer="{{ c.maintainer_email|lower }}">
         <div class="card-header">
             <div class="flag-info">
                 {% if c.status == 'pending' %}
@@ -160,6 +176,64 @@ function showToast(msg, type) {
     clearTimeout(el._tid);
     el._tid = setTimeout(function() { el.classList.remove('toast--visible'); }, 4000);
 }
+
+// ---------------------------------------------------------------------------
+// Maintainer email filter
+// ---------------------------------------------------------------------------
+(function() {
+    const filterSelect = document.getElementById('maintainer-filter');
+    if (!filterSelect) return;
+
+    const userEmail = (filterSelect.dataset.userEmail || '').toLowerCase();
+    const cards = document.querySelectorAll('.card[data-maintainer]');
+    const emptyState = document.querySelector('.empty-state');
+    const selectBar = document.querySelector('.select-bar');
+
+    function applyFilter() {
+        const val = filterSelect.value;
+        let visibleCount = 0;
+
+        cards.forEach(function(card) {
+            const maintainer = card.dataset.maintainer || '';
+            let show = false;
+
+            if (val === '__all__') {
+                show = true;
+            } else if (val === '__mine__') {
+                show = maintainer === userEmail;
+            } else {
+                show = maintainer === val.toLowerCase();
+            }
+
+            card.style.display = show ? '' : 'none';
+            if (show) visibleCount++;
+        });
+
+        // Show/hide empty state
+        if (emptyState) {
+            emptyState.style.display = visibleCount === 0 ? '' : 'none';
+        }
+
+        // Update the visible count text
+        var countEl = document.getElementById('candidate-count');
+        if (countEl && val !== '__all__') {
+            countEl.textContent = visibleCount + ' flag' + (visibleCount !== 1 ? 's' : '');
+        }
+
+        // Hide select bar when no pending cards are visible
+        if (selectBar) {
+            const visiblePending = document.querySelectorAll('.card--pending');
+            let anyVisible = false;
+            visiblePending.forEach(function(c) { if (c.style.display !== 'none') anyVisible = true; });
+            selectBar.style.display = anyVisible ? '' : 'none';
+        }
+    }
+
+    filterSelect.addEventListener('change', applyFilter);
+
+    // Apply initial filter (My flags) on page load
+    applyFilter();
+})();
 
 // ---------------------------------------------------------------------------
 // Checkbox selection + floating action bar

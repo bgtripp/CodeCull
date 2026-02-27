@@ -175,7 +175,7 @@ _serializer = URLSafeTimedSerializer(_SESSION_SECRET)
 _ALLOWED_EMAILS: set[str] = set()
 _ALLOWED_DOMAINS: set[str] = set()
 
-for entry in os.getenv("ALLOWED_AUTH_EMAILS", "bentrippx@gmail.com,@cognition.ai").split(","):
+for entry in os.getenv("ALLOWED_AUTH_EMAILS", "you@example.com").split(","):
     entry = entry.strip().lower()
     if not entry:
         continue
@@ -365,6 +365,11 @@ def index(request: Request):
     with _refresh_lock:
         _refresh_pr_statuses()
 
+    # Collect unique maintainer emails for the filter dropdown
+    maintainer_emails: list[str] = sorted(
+        {c.maintainer_email for c in _candidates if c.maintainer_email},
+    )
+
     return templates.TemplateResponse(
         "index.html",
         {
@@ -374,6 +379,7 @@ def index(request: Request):
             "pr_stats": _pr_stats,
             "last_scan_time": _last_scan_time,
             "user_email": email,
+            "maintainer_emails": maintainer_emails,
         },
     )
 
