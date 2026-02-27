@@ -128,6 +128,7 @@ def sync_state(state_path: Path | None = None) -> dict:
                     sessions[flag_key]["pr_url"] = pr_url
                     logger.info("  -> %s: PR found: %s", flag_key, pr_url)
                 else:
+                    sessions[flag_key]["status"] = "error"
                     logger.warning("  -> %s: session finished but no PR URL found", flag_key)
             except Exception:
                 logger.exception("Failed to poll session for %s", flag_key)
@@ -216,12 +217,23 @@ def _send_slack_ready_notification(
 
     text = (
         f":recycle: *CodeCull: {n} PR{'s' if n != 1 else ''} ready for review*\n\n"
-        f"Dead code cleanup PRs are ready for:\n{flag_list}\n\n"
-        f":link: *<{dashboard_url}|Open Dashboard>*"
+        f"Dead code cleanup PRs are ready for:\n{flag_list}"
     )
 
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Open Dashboard"},
+                    "action_id": "open_dashboard",
+                    "url": dashboard_url,
+                    "style": "primary",
+                }
+            ],
+        },
     ]
 
     send_dm(slack_user_id, text, blocks)

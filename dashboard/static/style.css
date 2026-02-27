@@ -376,6 +376,47 @@ header {
     text-decoration: underline;
 }
 
+.session-progress {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: var(--yellow);
+}
+
+.session-progress .session-link {
+    margin-left: auto;
+    color: var(--accent);
+    font-size: 0.8rem;
+}
+
+.session-error-detail {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: var(--text-muted);
+}
+
+.session-error-detail .session-link {
+    margin-left: auto;
+    color: var(--accent);
+    font-size: 0.8rem;
+}
+
+.spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--yellow);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
 /* ---- Card actions ---- */
 
 .card-actions {
