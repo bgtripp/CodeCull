@@ -88,6 +88,9 @@ Instructions:
 def _build_stacked_prompt(
     flags: list[dict],
     repo: str,
+    *,
+    callback_url: str = "",
+    callback_token: str = "",
 ) -> str:
     """Build a prompt for removing flags as a true stacked PR chain.
 
@@ -149,11 +152,27 @@ Each branch is based on the previous one so changes build on each other.
 - Each PR must target the PREVIOUS branch (except the first, which targets `main`).
 - In each PR description, state which flag was removed and what code path was kept.
 - Make sure each branch builds cleanly (no broken imports, no syntax errors).
-"""
+
+{_callback_block(callback_url, callback_token)}"""
 
 
 _MAX_RETRIES = 2
 _RETRY_BASE_DELAY = 5  # seconds
+
+
+def _callback_block(callback_url: str, callback_token: str) -> str:
+    """Return a prompt section telling Devin to POST back to CodeCull when done."""
+    if not callback_url or not callback_token:
+        return ""
+    return (
+        "**After ALL PRs are created**, run this curl command to notify the "
+        "CodeCull dashboard so it can send a Slack notification to the "
+        "maintainer:\n\n"
+        f"```\ncurl -s -X POST {callback_url}/api/session-complete "
+        f"-H 'Authorization: Bearer {callback_token}'\n```\n\n"
+        "This is the LAST step. Run it after pushing all branches and "
+        "opening all PRs.\n"
+    )
 
 
 def _post_with_retry(url: str, headers: dict, json: dict, *, timeout: int = 30) -> httpx.Response:
@@ -220,15 +239,24 @@ def create_cleanup_session(
 def create_stacked_cleanup_session(
     flags: list[dict],
     repo: str,
+    *,
+    callback_url: str = "",
+    callback_token: str = "",
 ) -> dict:
     """Create a single Devin session that removes multiple flags in one PR.
 
     *flags* is a list of dicts, each with keys: flag_key, variation, files.
 
+    When *callback_url* and *callback_token* are provided, the prompt includes
+    a final ``curl`` step so Devin POSTs back to the dashboard when all PRs
+    are created, triggering the Phase 2 Slack notification immediately.
+
     Returns a dict with 'session_id' and 'url'.
     Retries automatically on 429 (rate limit) with exponential back-off.
     """
-    prompt = _build_stacked_prompt(flags, repo)
+    prompt = _build_stacked_prompt(
+        flags, repo, callback_url=callback_url, callback_token=callback_token,
+    )
     flag_keys = [f["flag_key"] for f in flags]
     tags = ["CodeCull", "stacked"] + [f"flag:{k}" for k in flag_keys]
 

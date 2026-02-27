@@ -839,11 +839,14 @@ def api_fix_selected(request: Request, flag_keys: list[str] = Body(..., embed=Tr
         if not maintainer_email and candidate.maintainer_email:
             maintainer_email = candidate.maintainer_email
 
-    # Dispatch the stacked Devin session
+    # Dispatch the stacked Devin session (with callback so Devin notifies us)
+    dashboard_url = os.getenv("DASHBOARD_URL", "").rstrip("/")
     try:
         result = create_stacked_cleanup_session(
             flags=flags_for_prompt,
             repo=repo_slug,
+            callback_url=dashboard_url,
+            callback_token=_SYNC_API_TOKEN,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
@@ -983,6 +986,33 @@ def api_sync_status(request: Request):
         else:
             raise HTTPException(status_code=401, detail="Not authenticated")
     return _sync_status
+
+
+# ---------------------------------------------------------------------------
+# Session-complete callback (called by Devin when all PRs are created)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/session-complete")
+def api_session_complete(request: Request):
+    """Callback fired by the Devin session after it creates all stacked PRs.
+
+    Triggers ``_refresh_pr_statuses()`` which matches PRs to flags, sends the
+    Phase 2 Slack notification, and archives flags.  This is the primary
+    mechanism for delivering the Slack DM — the background poller serves only
+    as a safety-net fallback.
+
+    Auth: Bearer ``SYNC_API_TOKEN``.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not _SYNC_API_TOKEN or auth_header != f"Bearer {_SYNC_API_TOKEN}":
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    with _refresh_lock:
+        _refresh_pr_statuses()
+
+    logger.info("Session-complete callback: refresh done")
+    return {"status": "ok", "message": "Refresh triggered"}
 
 
 # ---------------------------------------------------------------------------
