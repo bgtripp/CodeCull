@@ -13,7 +13,13 @@
         <span class="last-scan">Last scan {{ last_scan_time.strftime('%b %d, %Y %H:%M UTC') }}</span>
         {% endif %}
     </div>
-    <span class="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready for review</span>
+    <div class="toolbar-right">
+        <span class="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready for review</span>
+        <button id="reset-demo-btn" class="btn btn-reset" title="Reset LogiOps to pre-cleanup state for re-demoing">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+            Reset Demo
+        </button>
+    </div>
 </div>
 
 {% if not visible %}
@@ -118,6 +124,63 @@
     setInterval(function() {
         location.reload();
     }, 15000);
+})();
+
+// Reset Demo button
+(function() {
+    const btn = document.getElementById('reset-demo-btn');
+    if (!btn) return;
+
+    btn.addEventListener('click', async function() {
+        if (!confirm('Reset the demo? This will:\n\n' +
+            '1. Restore all feature flag references in LogiOps\n' +
+            '2. Re-create stale flags in the flag service\n' +
+            '3. Close any open cleanup PRs\n' +
+            '4. Clear the dashboard state\n\n' +
+            'Continue?')) return;
+
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> Resetting\u2026';
+
+        try {
+            const resp = await fetch('/api/reset-demo', {method: 'POST'});
+            const data = await resp.json();
+
+            if (data.status === 'started' || data.status === 'already_running') {
+                btn.innerHTML = '<span class="spinner"></span> Resetting\u2026';
+                // Poll until done
+                const poll = setInterval(async function() {
+                    try {
+                        const sr = await fetch('/api/reset-demo/status');
+                        const sd = await sr.json();
+                        if (!sd.running) {
+                            clearInterval(poll);
+                            if (sd.error) {
+                                alert('Reset failed: ' + sd.error);
+                                btn.disabled = false;
+                                btn.innerHTML = 'Reset Demo';
+                            } else {
+                                location.reload();
+                            }
+                        }
+                    } catch(e) {
+                        clearInterval(poll);
+                        alert('Error polling reset status');
+                        btn.disabled = false;
+                        btn.innerHTML = 'Reset Demo';
+                    }
+                }, 3000);
+            } else {
+                alert('Unexpected response: ' + JSON.stringify(data));
+                btn.disabled = false;
+                btn.innerHTML = 'Reset Demo';
+            }
+        } catch(e) {
+            alert('Failed to start reset: ' + e.message);
+            btn.disabled = false;
+            btn.innerHTML = 'Reset Demo';
+        }
+    });
 })();
 </script>
 {% endblock %}

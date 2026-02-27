@@ -111,6 +111,12 @@ header {
     color: var(--text);
 }
 
+.toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
 .candidate-count {
     color: var(--text-muted);
     font-size: 0.85rem;
@@ -173,6 +179,19 @@ header {
     color: var(--text-muted);
     cursor: not-allowed;
 }
+
+.btn-reset {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: var(--surface-hover);
+    color: var(--orange);
+    border: 1px solid var(--border);
+    font-family: var(--font);
+}
+.btn-reset:hover { background: var(--border); border-color: var(--orange); }
+.btn-reset:disabled { opacity: 0.6; cursor: wait; }
+.btn-reset .spinner { border-color: var(--orange); border-top-color: transparent; }
 
 /* ---- Cards ---- */
 
