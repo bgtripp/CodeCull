@@ -560,9 +560,12 @@ def _refresh_pr_statuses() -> None:
             fk_session = _sessions.get(fk)
             if fk_session and fk_session.get("pr_url"):
                 pr_urls_for_stack.append(fk_session["pr_url"])
-        if len(pr_urls_for_stack) >= len(stacked_keys) and pr_urls_for_stack:
+        # Deduplicate — fallback URLs may have been assigned for unmatched
+        # flags; only notify when we have enough *distinct* PRs.
+        unique_pr_urls = list(dict.fromkeys(pr_urls_for_stack))
+        if len(unique_pr_urls) >= len(stacked_keys) and unique_pr_urls:
             logger.info("Catch-up: sending Phase 2 Slack for stacked session %s", sid)
-            sent = _send_phase2_notification(stacked, pr_urls_for_stack)
+            sent = _send_phase2_notification(stacked, unique_pr_urls)
             if sent:
                 stacked["notified"] = True
                 state_changed = True
