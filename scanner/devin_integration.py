@@ -171,16 +171,19 @@ def stop_session(session_id: str) -> bool:
 def stop_codecull_sessions() -> int:
     """Stop all running/suspended CodeCull sessions to free up org slots.
 
+    Uses concurrent requests to stay within Fly.io's 60 s timeout.
     Returns the number of sessions stopped.
     """
-    stopped = 0
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    session_ids: list[str] = []
     for status_filter in ("running", "suspended"):
         try:
             resp = httpx.get(
                 f"{_api_base()}/sessions",
                 headers=_headers(),
                 params={"limit": 50, "status": status_filter},
-                timeout=30,
+                timeout=15,
             )
             resp.raise_for_status()
             items = resp.json().get("items", [])
@@ -192,11 +195,22 @@ def stop_codecull_sessions() -> int:
             tags = session.get("tags") or []
             if "CodeCull" not in tags:
                 continue
-            sid = session.get("session_id", "")
-            if stop_session(sid):
-                stopped += 1
+            session_ids.append(session.get("session_id", ""))
 
-    logger.info("Stopped %d old CodeCull sessions", stopped)
+    if not session_ids:
+        return 0
+
+    stopped = 0
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(stop_session, sid): sid for sid in session_ids}
+        for fut in as_completed(futures, timeout=20):
+            try:
+                if fut.result():
+                    stopped += 1
+            except Exception:
+                pass
+
+    logger.info("Stopped %d / %d old CodeCull sessions", stopped, len(session_ids))
     return stopped
 
 
