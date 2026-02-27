@@ -696,6 +696,21 @@ def api_reset_demo(request: Request):
         _apply_state_to_candidates(_candidates)
 
         logger.info("Demo reset completed successfully")
+
+        # Kick off a sync in the background so Devin creates cleanup PRs
+        if _sync_lock.acquire(blocking=False):
+            _sync_status["running"] = True
+            _sync_status["error"] = None
+
+            def _post_reset_sync() -> None:
+                try:
+                    _run_sync_background()
+                finally:
+                    _sync_lock.release()
+
+            threading.Thread(target=_post_reset_sync, daemon=True).start()
+            logger.info("Post-reset sync started in background")
+
         return {"status": "done", "results": results}
     except Exception as exc:
         logger.exception("Demo reset failed")
