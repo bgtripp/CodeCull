@@ -85,12 +85,16 @@ Instructions:
 """
 
 
-_MAX_RETRIES = 3
-_RETRY_BASE_DELAY = 10  # seconds; doubles on each retry
+_MAX_RETRIES = 2
+_RETRY_BASE_DELAY = 5  # seconds
 
 
 def _post_with_retry(url: str, headers: dict, json: dict, *, timeout: int = 30) -> httpx.Response:
-    """POST with exponential back-off on 429 Too Many Requests."""
+    """POST with a short retry on 429 Too Many Requests.
+
+    Only retries a couple of times with short delays to stay within
+    Fly.io's 60 s request timeout when called synchronously.
+    """
     delay = _RETRY_BASE_DELAY
     for attempt in range(1, _MAX_RETRIES + 1):
         resp = httpx.post(url, headers=headers, json=json, timeout=timeout)
@@ -98,7 +102,7 @@ def _post_with_retry(url: str, headers: dict, json: dict, *, timeout: int = 30) 
             resp.raise_for_status()
             return resp
         try:
-            retry_after = int(resp.headers.get("Retry-After", str(delay)))
+            retry_after = min(int(resp.headers.get("Retry-After", str(delay))), 15)
         except (ValueError, TypeError):
             retry_after = delay
         logger.warning(
@@ -106,7 +110,7 @@ def _post_with_retry(url: str, headers: dict, json: dict, *, timeout: int = 30) 
             attempt, _MAX_RETRIES, retry_after,
         )
         time.sleep(retry_after)
-        delay = min(delay * 2, 120)
+        delay = min(delay * 2, 15)
     # Final attempt — let the error propagate
     resp = httpx.post(url, headers=headers, json=json, timeout=timeout)
     resp.raise_for_status()
