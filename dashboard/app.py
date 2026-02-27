@@ -839,14 +839,11 @@ def api_fix_selected(request: Request, flag_keys: list[str] = Body(..., embed=Tr
         if not maintainer_email and candidate.maintainer_email:
             maintainer_email = candidate.maintainer_email
 
-    # Dispatch the stacked Devin session (with callback so Devin notifies us)
-    dashboard_url = os.getenv("DASHBOARD_URL", "").rstrip("/")
+    # Dispatch the stacked Devin session (Devin reads callback creds from .codecull)
     try:
         result = create_stacked_cleanup_session(
             flags=flags_for_prompt,
             repo=repo_slug,
-            callback_url=dashboard_url,
-            callback_token=_SYNC_API_TOKEN,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 429:
