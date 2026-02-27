@@ -80,6 +80,8 @@ def _apply_state_to_candidates(candidates: list[FlagCandidate]) -> None:
             c.status = "done"
         elif status in ("running", "in_progress"):
             c.status = "in_progress"
+        elif status == "queued":
+            c.status = "in_progress"  # show spinner for queued too
         elif status in ("error", "finished", "stopped", "blocked"):
             c.status = "error"
         else:
@@ -390,11 +392,16 @@ def _refresh_pr_statuses() -> None:
 
     Also removes error-state sessions (no PR created) so they don't persist
     forever on the dashboard.
+
+    For *queued* sessions (rate-limited during dispatch), automatically
+    attempts to dispatch them once a running session completes or capacity
+    frees up.
     """
     global _candidates, _sessions, _pr_stats
 
     keys_to_remove: list[str] = []
     state_changed = False
+    running_count = sum(1 for s in _sessions.values() if s.get("status") == "running")
 
     for flag_key, session in list(_sessions.items()):
         pr_url = session.get("pr_url")
@@ -404,6 +411,10 @@ def _refresh_pr_statuses() -> None:
             status = session.get("status", "")
             sid = session.get("session_id")
 
+            # Skip queued sessions — handled in the auto-dispatch pass below
+            if status == "queued":
+                continue
+
             # If session is still running, poll Devin for completion
             if sid and status == "running":
                 try:
@@ -411,6 +422,7 @@ def _refresh_pr_statuses() -> None:
                     state = devin_status.get("status_enum", "unknown")
 
                     if state in ("finished", "stopped", "blocked"):
+                        running_count -= 1
                         found_pr = extract_pr_url(devin_status)
                         if found_pr:
                             session["pr_url"] = found_pr
@@ -451,6 +463,37 @@ def _refresh_pr_statuses() -> None:
 
         _candidates = [c for c in _candidates if c.flag_key not in keys_to_remove]
         state_changed = True
+
+    # Auto-dispatch queued sessions now that capacity may have freed up
+    queued = [(k, s) for k, s in _sessions.items() if s.get("status") == "queued"]
+    if queued:
+        repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+        for flag_key, session in queued:
+            candidate = _find_candidate(flag_key)
+            if not candidate:
+                continue
+            try:
+                result = create_cleanup_session(
+                    flag_key=candidate.flag_key,
+                    repo=repo_slug,
+                    variation=candidate.variation_served,
+                    files=candidate.files_affected,
+                )
+                _sessions[flag_key] = {
+                    "session_id": result["session_id"],
+                    "url": result["url"],
+                    "status": "running",
+                    "pr_url": None,
+                }
+                state_changed = True
+                logger.info("%s: auto-dispatched queued session: %s", flag_key, result["url"])
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    logger.info("%s: still rate-limited, staying queued", flag_key)
+                else:
+                    logger.exception("Failed to auto-dispatch %s", flag_key)
+            except Exception:
+                logger.exception("Failed to auto-dispatch %s", flag_key)
 
     if state_changed:
         # Re-apply statuses and persist
@@ -821,6 +864,15 @@ def api_reset_demo_dispatch(request: Request):
             })
             dispatched_count += 1
             logger.info("%s: Devin session dispatched: %s", c.flag_key, result["url"])
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                # Rate limited — queue for auto-dispatch on next refresh
+                _sessions[c.flag_key] = {"status": "queued"}
+                dispatch_results.append({"flag": c.flag_key, "action": "queued"})
+                logger.warning("%s: 429 rate-limited, queued for later dispatch", c.flag_key)
+            else:
+                logger.exception("Failed to dispatch Devin for %s", c.flag_key)
+                dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})
         except Exception as exc:
             logger.exception("Failed to dispatch Devin for %s", c.flag_key)
             dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})

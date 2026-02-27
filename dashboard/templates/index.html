@@ -77,10 +77,15 @@
             </ul>
         </details>
 
-        {% if sessions.get(c.flag_key) and sessions[c.flag_key].get('session_id') %}
+        {% if sessions.get(c.flag_key) %}
         <div class="session-info">
             {% set s = sessions[c.flag_key] %}
-            {% if c.status == 'in_progress' %}
+            {% if s.get('status') == 'queued' %}
+            <div class="session-progress">
+                <span class="spinner"></span>
+                <span>Queued &mdash; waiting for capacity&hellip;</span>
+            </div>
+            {% elif c.status == 'in_progress' and s.get('session_id') %}
             <div class="session-progress">
                 <span class="spinner"></span>
                 <span>Devin is creating a cleanup PR&hellip;</span>
