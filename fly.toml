@@ -1,0 +1,16 @@
+app = "codecull-idduawlp"
+primary_region = "sjc"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+
+  # The Phase 2 Slack notification relies on a background poller thread.
+  # If the Fly machine autosuspends, that poller cannot run.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
