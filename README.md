@@ -1,6 +1,6 @@
 # CodeCull
 
-Automated stale feature flag cleanup. Scans your codebase for feature flags, cross-references Unleash (or a mock JSON file), identifies flags that have been always-on or always-off for 90+ days, and dispatches [Devin](https://devin.ai) to remove them — as a stacked PR chain.
+Automated stale feature flag cleanup. Scans your codebase for feature flags, cross-references your Unleash instance, identifies flags that have been always-on or always-off for 90+ days, and dispatches [Devin](https://devin.ai) to remove them — as a stacked PR chain.
 
 ## How it works
 
@@ -123,7 +123,6 @@ poetry run python main.py
 | `DASHBOARD_URL` | No | URL included in Slack DM (default: `http://localhost:8000`) |
 | `TARGET_REPO` | No | GitHub repo in `owner/repo` format (default: `bgtripp/LogiOps`) |
 | `TARGET_REPO_PATH` | No | Local path to target repo (skips git clone if set) |
-| `MOCK_FLAG_DATA_PATH` | No | Path to mock flag JSON (default: `./mock_flags.json`). For backwards compat, `MOCK_LD_DATA_PATH` is still supported. |
 
 ## Target repo
 
@@ -142,7 +141,6 @@ CodeCull scans an external repo — [`bgtripp/LogiOps`](https://github.com/bgtri
 ```
 CodeCull/
 ├── main.py                    # Entry point (dashboard, scan, or sync)
-├── mock_flags.json            # Mock flag data (used when UNLEASH_URL is not set)
 ├── .codecull_state.json       # Generated — PR state for dashboard (git-ignored)
 ├── scanner/
 │   ├── flag_scanner.py        # Code scanner + staleness analysis + repo cloning

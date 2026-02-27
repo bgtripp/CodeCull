@@ -1,6 +1,6 @@
 """
-Scanner — finds feature flag usage in a codebase and cross-references a
-feature flag service (Unleash or mock JSON) to identify stale flags.
+Scanner — finds feature flag usage in a codebase and cross-references the
+Unleash feature flag service to identify stale flags.
 
 A flag is considered *stale* when:
   - It has been serving a single variation (always-on or always-off) in
@@ -11,7 +11,6 @@ A flag is considered *stale* when:
 from __future__ import annotations
 
 import io
-import json
 import logging
 import os
 import re
@@ -111,15 +110,8 @@ def scan_codebase(repo_path: str, extensions: tuple[str, ...] = (".py",)) -> dic
 
 
 # ---------------------------------------------------------------------------
-# Flag service readers (Unleash or mock JSON fallback)
+# Flag service reader (Unleash)
 # ---------------------------------------------------------------------------
-
-def load_mock_flags(mock_data_path: str) -> dict:
-    """Load mock flag JSON and return a dict keyed by flag key."""
-    with open(mock_data_path, encoding="utf-8") as fh:
-        data = json.load(fh)
-    return {f["key"]: f for f in data["flags"]}
-
 
 def _unleash_basic_auth() -> tuple[str, str] | None:
     """Return (username, password) for HTTP Basic Auth if configured.
@@ -435,26 +427,19 @@ def get_target_repo_path() -> str:
 
 def run_scan(
     repo_path: str | None = None,
-    mock_data_path: str | None = None,
 ) -> list[FlagCandidate]:
     """Run a full scan and return stale flag candidates.
 
-    Uses Unleash Admin API when ``UNLEASH_URL`` is set, otherwise falls
-    back to a local mock JSON file.
+    Fetches flags from the Unleash Admin API (``UNLEASH_URL`` must be set).
     """
     repo_path = repo_path or get_target_repo_path()
 
     unleash_url = os.getenv("UNLEASH_URL", "")
-    if unleash_url:
-        flag_data = load_unleash_flags(unleash_url)
-    else:
-        mock_data_path = (
-            mock_data_path
-            or os.getenv("MOCK_FLAG_DATA_PATH")
-            or os.getenv("MOCK_LD_DATA_PATH")
-            or "./mock_flags.json"
+    if not unleash_url:
+        raise RuntimeError(
+            "UNLEASH_URL is not set — cannot scan without a flag service"
         )
-        flag_data = load_mock_flags(mock_data_path)
+    flag_data = load_unleash_flags(unleash_url)
 
     code_flags = scan_codebase(repo_path)
     return analyse_flags(code_flags, flag_data)
