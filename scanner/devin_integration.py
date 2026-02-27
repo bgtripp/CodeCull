@@ -333,21 +333,22 @@ def stop_codecull_sessions() -> int:
 def get_session_status(session_id: str) -> dict:
     """Retrieve the current status of a Devin session.
 
-    Uses the list endpoint with a ``session_id`` query-param filter
-    because the individual ``GET /sessions/{id}`` route returns 403
-    for service-user API keys.
+    Uses the list endpoint because the individual ``GET /sessions/{id}``
+    route returns 403 for service-user API keys.  The v3 list endpoint
+    ignores the ``session_id`` query-param filter, so we fetch recent
+    sessions and find the exact match client-side.
     """
     resp = httpx.get(
         f"{_api_base()}/sessions",
         headers=_headers(),
-        params={"session_id": session_id},
+        params={"limit": 50},
         timeout=30,
     )
     resp.raise_for_status()
-    items = resp.json().get("items", [])
-    if not items:
-        raise ValueError(f"Session {session_id} not found")
-    return items[0]
+    for item in resp.json().get("items", []):
+        if item.get("session_id") == session_id:
+            return item
+    raise ValueError(f"Session {session_id} not found in recent sessions")
 
 
 def poll_session_until_done(session_id: str) -> dict:
