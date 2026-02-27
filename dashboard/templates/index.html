@@ -136,8 +136,8 @@
             '1. Restore all feature flag references in LogiOps\n' +
             '2. Re-create stale flags in the flag service\n' +
             '3. Close any open cleanup PRs\n' +
-            '4. Clear the dashboard state\n\n' +
-            'This takes ~15 seconds. Continue?')) return;
+            '4. Dispatch Devin to create new cleanup PRs\n\n' +
+            'This takes ~20-30 seconds. Continue?')) return;
 
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span> Resetting\u2026';

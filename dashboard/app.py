@@ -27,9 +27,16 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from scanner.demo_reset import run_demo_reset
-from scanner.devin_integration import create_rebase_session, poll_session_until_done
+from scanner.devin_integration import (
+    create_cleanup_session,
+    create_rebase_session,
+    extract_pr_url,
+    get_session_status,
+    poll_session_until_done,
+)
 from scanner.flag_scanner import FlagCandidate, run_scan
 from scanner.github_stats import (
+    discover_cleanup_prs,
     fetch_pr_stats,
     list_pull_requests,
     merge_main_into_branch,
@@ -375,19 +382,49 @@ async def flag_status(request: Request, flag_key: str):
 def _refresh_pr_statuses() -> None:
     """Check GitHub for merged/closed PRs and drop them from the queue.
 
+    For sessions still marked *running* (no PR yet), queries the Devin API
+    to see if the session finished and produced a PR URL.  This lets the
+    dashboard pick up completed Devin work even after a Fly.io machine
+    restart wiped in-memory state.
+
     Also removes error-state sessions (no PR created) so they don't persist
     forever on the dashboard.
     """
     global _candidates, _sessions, _pr_stats
 
     keys_to_remove: list[str] = []
+    state_changed = False
 
     for flag_key, session in list(_sessions.items()):
         pr_url = session.get("pr_url")
 
-        # Remove sessions stuck in error/terminal state with no PR
+        # For sessions without a PR, check Devin for updates
         if not pr_url:
             status = session.get("status", "")
+            sid = session.get("session_id")
+
+            # If session is still running, poll Devin for completion
+            if sid and status == "running":
+                try:
+                    devin_status = get_session_status(sid)
+                    state = devin_status.get("status_enum", "unknown")
+
+                    if state in ("finished", "stopped", "blocked"):
+                        found_pr = extract_pr_url(devin_status)
+                        if found_pr:
+                            session["pr_url"] = found_pr
+                            session["status"] = "ready"
+                            state_changed = True
+                            logger.info("%s: Devin finished, PR found: %s", flag_key, found_pr)
+                        else:
+                            session["status"] = "error"
+                            state_changed = True
+                            logger.info("%s: Devin finished but no PR (state=%s)", flag_key, state)
+                except Exception:
+                    logger.exception("Failed to check Devin status for %s", flag_key)
+                continue
+
+            # Remove sessions stuck in error/terminal state with no PR
             if status in ("error", "finished", "stopped", "blocked"):
                 logger.info("Removing %s — session ended without a PR (status=%s)", flag_key, status)
                 keys_to_remove.append(flag_key)
@@ -399,6 +436,7 @@ def _refresh_pr_statuses() -> None:
 
         # Update cached stats while we're at it
         _pr_stats[flag_key] = stats
+        state_changed = True
 
         if stats.get("merged") or stats.get("state") == "closed":
             logger.info("PR for %s is %s — removing from queue", flag_key,
@@ -411,10 +449,13 @@ def _refresh_pr_statuses() -> None:
             _pr_stats.pop(key, None)
 
         _candidates = [c for c in _candidates if c.flag_key not in keys_to_remove]
+        state_changed = True
 
-        # Persist the updated state so restarts also reflect the removal
+    if state_changed:
+        # Re-apply statuses and persist
+        _apply_state_to_candidates(_candidates)
         save_state(_STATE_PATH, _sessions, _pr_stats)
-        logger.info("Removed %d merged/closed/errored item(s) from queue", len(keys_to_remove))
+        logger.info("State refreshed: removed %d, updated others", len(keys_to_remove))
 
 
 def _find_candidate(flag_key: str) -> FlagCandidate | None:
@@ -697,20 +738,61 @@ def api_reset_demo(request: Request):
 
         logger.info("Demo reset completed successfully")
 
-        # Kick off a sync in the background so Devin creates cleanup PRs
-        if _sync_lock.acquire(blocking=False):
-            _sync_status["running"] = True
-            _sync_status["error"] = None
+        # Dispatch Devin cleanup sessions synchronously (fast, ~2-3s each).
+        # We do NOT poll — the dashboard auto-refreshes for in-progress cards.
+        # This survives Fly.io machine suspension because state is persisted.
+        repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+        dispatch_results: list[dict] = []
 
-            def _post_reset_sync() -> None:
-                try:
-                    _run_sync_background()
-                finally:
-                    _sync_lock.release()
+        # Check for existing cleanup PRs first (avoid duplicate Devin sessions)
+        flag_keys = [c.flag_key for c in _candidates]
+        existing_prs: dict[str, dict] = {}
+        try:
+            existing_prs = discover_cleanup_prs(repo_slug, flag_keys)
+        except Exception:
+            logger.exception("Failed to discover existing cleanup PRs")
 
-            threading.Thread(target=_post_reset_sync, daemon=True).start()
-            logger.info("Post-reset sync started in background")
+        for c in _candidates:
+            existing = existing_prs.get(c.flag_key, {})
+            if existing.get("pr_url"):
+                _sessions[c.flag_key] = {
+                    "status": "ready",
+                    "pr_url": existing["pr_url"],
+                }
+                dispatch_results.append({"flag": c.flag_key, "action": "existing_pr"})
+                logger.info("%s: existing PR found, skipping dispatch", c.flag_key)
+                continue
 
+            try:
+                result = create_cleanup_session(
+                    flag_key=c.flag_key,
+                    repo=repo_slug,
+                    variation=c.variation_served,
+                    files=c.files_affected,
+                )
+                _sessions[c.flag_key] = {
+                    "session_id": result["session_id"],
+                    "url": result["url"],
+                    "status": "running",
+                    "pr_url": None,
+                }
+                dispatch_results.append({
+                    "flag": c.flag_key,
+                    "action": "dispatched",
+                    "session_url": result["url"],
+                })
+                logger.info("%s: Devin session dispatched: %s", c.flag_key, result["url"])
+            except Exception:
+                logger.exception("Failed to dispatch Devin for %s", c.flag_key)
+                dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed"})
+
+        # Apply session state to candidates so the page shows correct statuses
+        _apply_state_to_candidates(_candidates)
+
+        # Persist sessions so state survives machine restarts
+        save_state(_STATE_PATH, _sessions, _pr_stats)
+
+        results["dispatch"] = dispatch_results
         return {"status": "done", "results": results}
     except Exception as exc:
         logger.exception("Demo reset failed")
