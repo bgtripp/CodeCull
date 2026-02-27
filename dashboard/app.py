@@ -454,6 +454,10 @@ def _refresh_pr_statuses() -> None:
 
                 state_val = devin_status.get("status_enum") or devin_status.get("status", "unknown")
                 is_terminal = state_val in ("finished", "stopped", "blocked", "suspended")
+                # Devin is "done creating PRs" if it's terminal OR waiting
+                # for user input (e.g. awaiting_instructions).  Basically
+                # anything other than actively running.
+                done_creating = state_val != "running"
 
                 # Check for PRs even while running — Devin can create PRs before the session ends
                 all_pr_urls = extract_all_pr_urls(devin_status)
@@ -497,9 +501,11 @@ def _refresh_pr_statuses() -> None:
 
                             # Send Phase 2 Slack notification when:
                             # - All expected PRs are ready, OR
-                            # - Session is terminal (Devin won't create more PRs)
+                            # - Session is no longer actively running (terminal,
+                            #   awaiting_instructions, etc.) — Devin won't
+                            #   create more PRs without user action.
                             all_covered = len(all_pr_urls) >= len(stacked_keys)
-                            if not stacked.get("notified") and (all_covered or is_terminal):
+                            if not stacked.get("notified") and (all_covered or done_creating):
                                 sent = _send_phase2_notification(stacked, all_pr_urls)
                                 if sent:
                                     stacked["notified"] = True
@@ -594,7 +600,7 @@ def _refresh_pr_statuses() -> None:
             try:
                 devin_status = get_session_status(sid)
                 sv = devin_status.get("status_enum") or devin_status.get("status", "")
-                session_done = sv in ("finished", "stopped", "blocked", "suspended")
+                session_done = sv != "running"
             except Exception:
                 # Can't reach Devin — assume session is done (old session)
                 session_done = True
