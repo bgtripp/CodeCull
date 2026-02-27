@@ -331,14 +331,23 @@ def stop_codecull_sessions() -> int:
 
 
 def get_session_status(session_id: str) -> dict:
-    """Retrieve the current status of a Devin session."""
+    """Retrieve the current status of a Devin session.
+
+    Uses the list endpoint with a ``session_id`` query-param filter
+    because the individual ``GET /sessions/{id}`` route returns 403
+    for service-user API keys.
+    """
     resp = httpx.get(
-        f"{_api_base()}/sessions/{session_id}",
+        f"{_api_base()}/sessions",
         headers=_headers(),
+        params={"session_id": session_id},
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.json()
+    items = resp.json().get("items", [])
+    if not items:
+        raise ValueError(f"Session {session_id} not found")
+    return items[0]
 
 
 def poll_session_until_done(session_id: str) -> dict:
@@ -350,7 +359,7 @@ def poll_session_until_done(session_id: str) -> dict:
 
     while time.time() < deadline:
         status = get_session_status(session_id)
-        state = status.get("status_enum", "unknown")
+        state = status.get("status_enum") or status.get("status", "unknown")
 
         if state in ("finished", "stopped", "blocked"):
             logger.info("Session %s reached state: %s", session_id, state)

@@ -451,7 +451,7 @@ def _refresh_pr_statuses() -> None:
                         logger.exception("Failed to check Devin status for %s", flag_key)
                         continue
 
-                state_val = devin_status.get("status_enum", "unknown")
+                state_val = devin_status.get("status_enum") or devin_status.get("status", "unknown")
 
                 if state_val in ("finished", "stopped", "blocked"):
                     stacked = _stacked_sessions.get(sid)
