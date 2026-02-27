@@ -150,6 +150,56 @@ def create_cleanup_session(
     return {"session_id": session_id, "url": url}
 
 
+def stop_session(session_id: str) -> bool:
+    """Stop a Devin session. Returns True if stopped, False on error."""
+    try:
+        resp = httpx.post(
+            f"{_api_base()}/sessions/{session_id}/stop",
+            headers=_headers(),
+            timeout=15,
+        )
+        if resp.status_code < 300:
+            logger.info("Stopped session %s", session_id)
+            return True
+        logger.warning("Failed to stop session %s: %d", session_id, resp.status_code)
+        return False
+    except Exception:
+        logger.exception("Error stopping session %s", session_id)
+        return False
+
+
+def stop_codecull_sessions() -> int:
+    """Stop all running/suspended CodeCull sessions to free up org slots.
+
+    Returns the number of sessions stopped.
+    """
+    stopped = 0
+    for status_filter in ("running", "suspended"):
+        try:
+            resp = httpx.get(
+                f"{_api_base()}/sessions",
+                headers=_headers(),
+                params={"limit": 50, "status": status_filter},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+        except Exception:
+            logger.exception("Failed to list %s sessions", status_filter)
+            continue
+
+        for session in items:
+            tags = session.get("tags") or []
+            if "CodeCull" not in tags:
+                continue
+            sid = session.get("session_id", "")
+            if stop_session(sid):
+                stopped += 1
+
+    logger.info("Stopped %d old CodeCull sessions", stopped)
+    return stopped
+
+
 def get_session_status(session_id: str) -> dict:
     """Retrieve the current status of a Devin session."""
     resp = httpx.get(

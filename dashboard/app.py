@@ -33,6 +33,7 @@ from scanner.devin_integration import (
     extract_pr_url,
     get_session_status,
     poll_session_until_done,
+    stop_codecull_sessions,
 )
 from scanner.flag_scanner import FlagCandidate, run_scan
 from scanner.github_stats import (
@@ -737,6 +738,13 @@ def api_reset_demo(request: Request):
         _apply_state_to_candidates(_candidates)
 
         logger.info("Demo reset completed successfully")
+
+        # Stop old CodeCull sessions to free up org session slots
+        try:
+            stopped = stop_codecull_sessions()
+            logger.info("Stopped %d old CodeCull sessions before dispatching", stopped)
+        except Exception:
+            logger.exception("Failed to stop old sessions (continuing anyway)")
 
         # Dispatch Devin cleanup sessions synchronously (fast, ~2-3s each).
         # We do NOT poll — the dashboard auto-refreshes for in-progress cards.
