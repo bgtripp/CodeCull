@@ -210,9 +210,6 @@ function showToast(msg, type) {
 
             if (flagKeys.length === 0) return;
 
-            if (!confirm('Fix ' + flagKeys.length + ' flag' + (flagKeys.length !== 1 ? 's' : '') +
-                ' in a single stacked PR?\n\nDevin will remove all selected flags and open a draft PR.')) return;
-
             fixBtn.disabled = true;
             fixBtn.innerHTML = '<span class="spinner spinner--white"></span> Dispatching Devin\u2026';
 
@@ -270,14 +267,6 @@ function showToast(msg, type) {
     const resetIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
 
     btn.addEventListener('click', async function() {
-        if (!confirm('Reset the demo? This will:\n\n' +
-            '1. Restore all feature flag references in LogiOps\n' +
-            '2. Re-create stale flags in the flag service\n' +
-            '3. Close any open cleanup PRs\n' +
-            '4. Send a Slack notification about stale flags\n\n' +
-            'You can then select flags and click "Fix in Stacked PR".\n\n' +
-            'Continue?')) return;
-
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span> Resetting\u2026';
 
