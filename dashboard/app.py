@@ -439,8 +439,9 @@ def _refresh_pr_statuses() -> None:
 
                             # Send Phase 2 Slack notification (once per stacked session)
                             if not stacked.get("notified"):
-                                _send_phase2_notification(stacked, found_pr)
-                                stacked["notified"] = True
+                                sent = _send_phase2_notification(stacked, found_pr)
+                                if sent:
+                                    stacked["notified"] = True
                     else:
                         session["status"] = "error"
                         state_changed = True
@@ -489,8 +490,11 @@ def _refresh_pr_statuses() -> None:
         logger.info("State refreshed: removed %d, updated others", len(keys_to_remove))
 
 
-def _send_phase2_notification(stacked: dict, pr_url: str) -> None:
-    """Send Phase 2 Slack DM when a stacked cleanup PR is ready."""
+def _send_phase2_notification(stacked: dict, pr_url: str) -> bool:
+    """Send Phase 2 Slack DM when a stacked cleanup PR is ready.
+
+    Returns ``True`` if the notification was sent successfully.
+    """
     flag_keys = stacked.get("flag_keys", [])
     maintainer_email = stacked.get("maintainer_email", "")
     dashboard_url = os.getenv("DASHBOARD_URL", "http://localhost:8000")
@@ -508,7 +512,7 @@ def _send_phase2_notification(stacked: dict, pr_url: str) -> None:
 
     if not maintainer_email:
         logger.warning("No maintainer email for Phase 2 notification")
-        return
+        return False
 
     try:
         send_pr_ready_notification(
@@ -517,8 +521,10 @@ def _send_phase2_notification(stacked: dict, pr_url: str) -> None:
             pr_url=pr_url,
             dashboard_url=dashboard_url,
         )
+        return True
     except Exception:
         logger.exception("Failed to send Phase 2 Slack notification")
+        return False
 
 
 def _find_candidate(flag_key: str) -> FlagCandidate | None:
