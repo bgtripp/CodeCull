@@ -193,7 +193,15 @@ def stop_codecull_sessions() -> int:
 
         for session in items:
             tags = session.get("tags") or []
-            if "CodeCull" not in tags:
+            title = (session.get("title") or "").lower()
+            # Match by tag OR by title pattern (older sessions lack tags)
+            is_codecull = (
+                "CodeCull" in tags
+                or "remove stale" in title
+                or "stale flag" in title
+                or "stale feature flag" in title
+            )
+            if not is_codecull:
                 continue
             session_ids.append(session.get("session_id", ""))
 
