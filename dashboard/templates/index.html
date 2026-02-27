@@ -137,34 +137,41 @@
             '2. Re-create stale flags in the flag service\n' +
             '3. Close any open cleanup PRs\n' +
             '4. Dispatch Devin to create new cleanup PRs\n\n' +
-            'This takes ~20-30 seconds. Continue?')) return;
+            'This takes ~30-45 seconds. Continue?')) return;
 
         btn.disabled = true;
-        btn.innerHTML = '<span class="spinner"></span> Resetting\u2026';
+
+        function resetBtn() {
+            btn.disabled = false;
+            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg> Reset Demo';
+        }
 
         try {
-            const resp = await fetch('/api/reset-demo', {method: 'POST'});
-            const data = await resp.json();
+            // Phase 1: Reset files, flags, close PRs (~6s)
+            btn.innerHTML = '<span class="spinner"></span> Resetting files\u2026';
+            const r1 = await fetch('/api/reset-demo', {method: 'POST'});
+            const d1 = await r1.json();
 
-            if (data.status === 'done') {
-                location.reload();
-            } else if (data.status === 'error') {
-                alert('Reset failed: ' + data.message);
-                btn.disabled = false;
-                btn.innerHTML = 'Reset Demo';
-            } else if (data.status === 'already_running') {
-                alert(data.message);
-                btn.disabled = false;
-                btn.innerHTML = 'Reset Demo';
-            } else {
-                alert('Unexpected response: ' + JSON.stringify(data));
-                btn.disabled = false;
-                btn.innerHTML = 'Reset Demo';
+            if (d1.status === 'error') {
+                alert('Reset failed: ' + d1.message);
+                resetBtn();
+                return;
             }
+            if (d1.status === 'already_running') {
+                alert(d1.message);
+                resetBtn();
+                return;
+            }
+
+            // Phase 2: Stop old sessions + dispatch Devin (~20-30s)
+            btn.innerHTML = '<span class="spinner"></span> Dispatching Devin\u2026';
+            const r2 = await fetch('/api/reset-demo/dispatch', {method: 'POST'});
+            const d2 = await r2.json();
+
+            location.reload();
         } catch(e) {
             alert('Failed to reset: ' + e.message);
-            btn.disabled = false;
-            btn.innerHTML = 'Reset Demo';
+            resetBtn();
         }
     });
 })();

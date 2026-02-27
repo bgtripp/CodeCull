@@ -203,12 +203,15 @@ def stop_codecull_sessions() -> int:
     stopped = 0
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(stop_session, sid): sid for sid in session_ids}
-        for fut in as_completed(futures, timeout=20):
-            try:
-                if fut.result():
-                    stopped += 1
-            except Exception:
-                pass
+        try:
+            for fut in as_completed(futures, timeout=20):
+                try:
+                    if fut.result():
+                        stopped += 1
+                except Exception:
+                    pass
+        except TimeoutError:
+            logger.warning("Timed out waiting for all session stop requests to complete")
 
     logger.info("Stopped %d / %d old CodeCull sessions", stopped, len(session_ids))
     return stopped

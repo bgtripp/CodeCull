@@ -705,14 +705,14 @@ _reset_lock = threading.Lock()
 
 @app.post("/api/reset-demo")
 def api_reset_demo(request: Request):
-    """Reset the demo to its initial state (synchronous).
+    """Reset the demo to its initial state (synchronous, fast).
 
-    Restores LogiOps source files, re-creates stale flags in Unleash,
-    closes open cleanup PRs, and clears the dashboard state.
+    Phase 1: Restores LogiOps source files, re-creates stale flags in
+    Unleash, closes open cleanup PRs, and clears the dashboard state.
+    Completes in ~6 s.
 
-    Runs synchronously (~10-15 s) so the response contains the full
-    result.  This avoids Fly.io machine-suspend issues that caused
-    background-thread state to be lost between requests.
+    The client should follow up with ``POST /api/reset-demo/dispatch``
+    to stop old sessions and dispatch new Devin cleanup sessions.
     """
     _check_auth(request)
 
@@ -737,77 +737,8 @@ def api_reset_demo(request: Request):
         _last_scan_time = datetime.now(timezone.utc)
         _apply_state_to_candidates(_candidates)
 
-        logger.info("Demo reset completed successfully")
-
-        # Stop old CodeCull sessions to free up org session slots
-        try:
-            stopped = stop_codecull_sessions()
-            logger.info("Stopped %d old CodeCull sessions before dispatching", stopped)
-        except Exception:
-            logger.exception("Failed to stop old sessions (continuing anyway)")
-
-        # Dispatch Devin cleanup sessions synchronously (fast, ~2-3s each).
-        # We do NOT poll — the dashboard auto-refreshes for in-progress cards.
-        # This survives Fly.io machine suspension because state is persisted.
-        repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
-        dispatch_results: list[dict] = []
-
-        # Check for existing cleanup PRs first (avoid duplicate Devin sessions)
-        flag_keys = [c.flag_key for c in _candidates]
-        existing_prs: dict[str, dict] = {}
-        try:
-            existing_prs = discover_cleanup_prs(repo_slug, flag_keys)
-        except Exception:
-            logger.exception("Failed to discover existing cleanup PRs")
-
-        dispatched_count = 0
-        for c in _candidates:
-            existing = existing_prs.get(c.flag_key, {})
-            if existing.get("pr_url"):
-                _sessions[c.flag_key] = {
-                    "status": "ready",
-                    "pr_url": existing["pr_url"],
-                }
-                dispatch_results.append({"flag": c.flag_key, "action": "existing_pr"})
-                logger.info("%s: existing PR found, skipping dispatch", c.flag_key)
-                continue
-
-            # Small delay between dispatches to avoid hammering the API
-            if dispatched_count > 0:
-                time.sleep(2)
-
-            try:
-                result = create_cleanup_session(
-                    flag_key=c.flag_key,
-                    repo=repo_slug,
-                    variation=c.variation_served,
-                    files=c.files_affected,
-                )
-                _sessions[c.flag_key] = {
-                    "session_id": result["session_id"],
-                    "url": result["url"],
-                    "status": "running",
-                    "pr_url": None,
-                }
-                dispatch_results.append({
-                    "flag": c.flag_key,
-                    "action": "dispatched",
-                    "session_url": result["url"],
-                })
-                dispatched_count += 1
-                logger.info("%s: Devin session dispatched: %s", c.flag_key, result["url"])
-            except Exception as exc:
-                logger.exception("Failed to dispatch Devin for %s", c.flag_key)
-                dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})
-
-        # Apply session state to candidates so the page shows correct statuses
-        _apply_state_to_candidates(_candidates)
-
-        # Persist sessions so state survives machine restarts
-        save_state(_STATE_PATH, _sessions, _pr_stats)
-
-        results["dispatch"] = dispatch_results
-        return {"status": "done", "results": results}
+        logger.info("Demo reset completed successfully — %d candidates", len(_candidates))
+        return {"status": "done", "results": results, "candidates": len(_candidates)}
     except Exception as exc:
         logger.exception("Demo reset failed")
         return JSONResponse(
@@ -816,3 +747,92 @@ def api_reset_demo(request: Request):
         )
     finally:
         _reset_lock.release()
+
+
+@app.post("/api/reset-demo/dispatch")
+def api_reset_demo_dispatch(request: Request):
+    """Dispatch Devin cleanup sessions after a reset (Phase 2).
+
+    Stops old CodeCull sessions to free up org slots, then dispatches
+    a new Devin session for each stale-flag candidate.  Each dispatch
+    is fast (~2-3 s) but stopping old sessions can take 10-20 s, so
+    the total may be up to ~30 s.  Results are persisted to the state
+    file so the dashboard survives Fly.io machine restarts.
+    """
+    _check_auth(request)
+
+    global _candidates, _sessions, _pr_stats
+
+    if not _candidates:
+        return {"status": "no_candidates", "message": "Run /api/reset-demo first."}
+
+    # Stop old CodeCull sessions to free up org session slots
+    stopped = 0
+    try:
+        stopped = stop_codecull_sessions()
+        logger.info("Stopped %d old CodeCull sessions before dispatching", stopped)
+    except Exception:
+        logger.exception("Failed to stop old sessions (continuing anyway)")
+
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    dispatch_results: list[dict] = []
+
+    # Check for existing cleanup PRs first (avoid duplicate Devin sessions)
+    flag_keys = [c.flag_key for c in _candidates]
+    existing_prs: dict[str, dict] = {}
+    try:
+        existing_prs = discover_cleanup_prs(repo_slug, flag_keys)
+    except Exception:
+        logger.exception("Failed to discover existing cleanup PRs")
+
+    dispatched_count = 0
+    for c in _candidates:
+        existing = existing_prs.get(c.flag_key, {})
+        if existing.get("pr_url"):
+            _sessions[c.flag_key] = {
+                "status": "ready",
+                "pr_url": existing["pr_url"],
+            }
+            dispatch_results.append({"flag": c.flag_key, "action": "existing_pr"})
+            logger.info("%s: existing PR found, skipping dispatch", c.flag_key)
+            continue
+
+        # Small delay between dispatches to avoid hammering the API
+        if dispatched_count > 0:
+            time.sleep(2)
+
+        try:
+            result = create_cleanup_session(
+                flag_key=c.flag_key,
+                repo=repo_slug,
+                variation=c.variation_served,
+                files=c.files_affected,
+            )
+            _sessions[c.flag_key] = {
+                "session_id": result["session_id"],
+                "url": result["url"],
+                "status": "running",
+                "pr_url": None,
+            }
+            dispatch_results.append({
+                "flag": c.flag_key,
+                "action": "dispatched",
+                "session_url": result["url"],
+            })
+            dispatched_count += 1
+            logger.info("%s: Devin session dispatched: %s", c.flag_key, result["url"])
+        except Exception as exc:
+            logger.exception("Failed to dispatch Devin for %s", c.flag_key)
+            dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})
+
+    # Apply session state to candidates so the page shows correct statuses
+    _apply_state_to_candidates(_candidates)
+
+    # Persist sessions so state survives machine restarts
+    save_state(_STATE_PATH, _sessions, _pr_stats)
+
+    return {
+        "status": "done",
+        "sessions_stopped": stopped,
+        "dispatch": dispatch_results,
+    }
