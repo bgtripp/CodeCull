@@ -85,7 +85,7 @@ Instructions:
 """
 
 
-_MAX_RETRIES = 5
+_MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 10  # seconds; doubles on each retry
 
 
@@ -97,7 +97,10 @@ def _post_with_retry(url: str, headers: dict, json: dict, *, timeout: int = 30) 
         if resp.status_code != 429:
             resp.raise_for_status()
             return resp
-        retry_after = int(resp.headers.get("Retry-After", str(delay)))
+        try:
+            retry_after = int(resp.headers.get("Retry-After", str(delay)))
+        except (ValueError, TypeError):
+            retry_after = delay
         logger.warning(
             "429 rate-limited (attempt %d/%d) — retrying in %ds",
             attempt, _MAX_RETRIES, retry_after,
