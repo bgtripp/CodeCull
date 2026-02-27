@@ -361,7 +361,7 @@ def poll_session_until_done(session_id: str) -> dict:
         status = get_session_status(session_id)
         state = status.get("status_enum") or status.get("status", "unknown")
 
-        if state in ("finished", "stopped", "blocked"):
+        if state in ("finished", "stopped", "blocked", "suspended"):
             logger.info("Session %s reached state: %s", session_id, state)
             return status
 
@@ -422,16 +422,23 @@ def extract_pr_url(session_status: dict) -> str | None:
 def extract_all_pr_urls(session_status: dict) -> list[str]:
     """Extract ALL pull request URLs from a Devin session result.
 
-    Returns a deduplicated list of GitHub PR URLs found in the session
-    structured outputs and result text.  Used for stacked PR sessions
-    that produce multiple PRs.
+    Returns a deduplicated list of GitHub PR URLs found in the session.
+    Checks the v3 list-API ``pull_requests`` field first (list of
+    ``{pr_url, pr_state}`` dicts), then falls back to legacy
+    ``structured_outputs`` and free-text ``result`` scanning.
     """
     seen: set[str] = set()
     urls: list[str] = []
 
-    # Check structured outputs first
-    structured = session_status.get("structured_outputs") or []
-    for output in structured:
+    # v3 list-API: "pull_requests" field (preferred)
+    for pr in session_status.get("pull_requests") or []:
+        url = pr.get("pr_url", "")
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    # Legacy: structured_outputs (from individual session endpoint)
+    for output in session_status.get("structured_outputs") or []:
         if "pull_request" in output:
             url = output["pull_request"].get("url", "")
             if url and url not in seen:

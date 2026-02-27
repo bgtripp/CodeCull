@@ -453,7 +453,7 @@ def _refresh_pr_statuses() -> None:
 
                 state_val = devin_status.get("status_enum") or devin_status.get("status", "unknown")
 
-                if state_val in ("finished", "stopped", "blocked"):
+                if state_val in ("finished", "stopped", "blocked", "suspended"):
                     stacked = _stacked_sessions.get(sid)
 
                     if stacked:
@@ -510,7 +510,7 @@ def _refresh_pr_statuses() -> None:
                 continue
 
             # Remove sessions stuck in error/terminal state with no PR
-            if status in ("error", "finished", "stopped", "blocked"):
+            if status in ("error", "finished", "stopped", "blocked", "suspended"):
                 logger.info("Removing %s — session ended without a PR (status=%s)", flag_key, status)
                 keys_to_remove.append(flag_key)
             continue
