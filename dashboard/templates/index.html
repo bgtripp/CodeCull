@@ -133,6 +133,9 @@
 {% endfor %}
 </div>
 
+<!-- Toast notification -->
+<div id="toast" class="toast"></div>
+
 <!-- Floating action bar — visible when checkboxes are selected -->
 <div id="action-bar" class="action-bar" style="display:none;">
     <span id="action-bar-count" class="action-bar-count">0 flags selected</span>
@@ -146,6 +149,18 @@
 
 {% block scripts %}
 <script>
+// ---------------------------------------------------------------------------
+// Toast helper
+// ---------------------------------------------------------------------------
+function showToast(msg, type) {
+    type = type || 'info';
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'toast toast--' + type + ' toast--visible';
+    clearTimeout(el._tid);
+    el._tid = setTimeout(function() { el.classList.remove('toast--visible'); }, 4000);
+}
+
 // ---------------------------------------------------------------------------
 // Checkbox selection + floating action bar
 // ---------------------------------------------------------------------------
@@ -208,24 +223,24 @@
                     body: JSON.stringify({flag_keys: flagKeys}),
                 });
 
-                if (resp.status === 429) {
-                    alert('Devin API rate limit \u2014 try again in a few minutes.');
-                    fixBtn.disabled = false;
-                    fixBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Fix in Stacked PR';
-                    return;
-                }
+                    if (resp.status === 429) {
+                        showToast('Devin API rate limit \u2014 try again in a few minutes.', 'error');
+                        fixBtn.disabled = false;
+                        fixBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Fix in Stacked PR';
+                        return;
+                    }
 
-                if (!resp.ok) {
-                    const err = await resp.json();
-                    alert('Error: ' + (err.detail || 'Unknown error'));
-                    fixBtn.disabled = false;
-                    fixBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Fix in Stacked PR';
-                    return;
-                }
+                    if (!resp.ok) {
+                        const err = await resp.json();
+                        showToast(err.detail || 'Something went wrong', 'error');
+                        fixBtn.disabled = false;
+                        fixBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Fix in Stacked PR';
+                        return;
+                    }
 
                 location.reload();
             } catch(e) {
-                alert('Failed: ' + e.message);
+                showToast('Failed: ' + e.message, 'error');
                 fixBtn.disabled = false;
                 fixBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Fix in Stacked PR';
             }
@@ -271,13 +286,13 @@
             const d = await r.json();
 
             if (d.status === 'error') {
-                alert('Reset failed: ' + d.message);
+                showToast('Reset failed: ' + d.message, 'error');
                 btn.disabled = false;
                 btn.innerHTML = resetIcon + ' Reset Demo';
                 return;
             }
             if (d.status === 'already_running') {
-                alert(d.message);
+                showToast(d.message, 'info');
                 btn.disabled = false;
                 btn.innerHTML = resetIcon + ' Reset Demo';
                 return;
@@ -285,7 +300,7 @@
 
             location.reload();
         } catch(e) {
-            alert('Failed to reset: ' + e.message);
+            showToast('Failed to reset: ' + e.message, 'error');
             btn.disabled = false;
             btn.innerHTML = resetIcon + ' Reset Demo';
         }
