@@ -63,6 +63,9 @@ _last_scan_time: datetime | None = None
 # Stacked session tracking: session_id -> {flag_keys, notified}
 _stacked_sessions: dict[str, dict] = {}
 
+# Background poller shutdown event
+_bg_poller_stop = threading.Event()
+
 
 _STATE_PATH = Path(os.getenv("CODECULL_STATE_PATH", str(_PROJECT_ROOT / ".codecull_state.json")))
 
@@ -126,7 +129,16 @@ async def lifespan(app: FastAPI):
         len(_pr_stats),
     )
 
+    # Start background poller so Slack notifications fire even when
+    # nobody is actively viewing the dashboard.
+    _bg_poller_stop.clear()
+    poller = threading.Thread(target=_background_session_poller, daemon=True)
+    poller.start()
+
     yield
+
+    # Signal the poller to stop on shutdown
+    _bg_poller_stop.set()
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +385,25 @@ async def flag_status(request: Request, flag_key: str):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Background session poller: periodically refresh PR / Devin session status
+# so Phase 2 Slack notifications fire even if nobody refreshes the dashboard.
+_BG_POLL_INTERVAL = int(os.getenv("BG_POLL_INTERVAL", "30"))  # seconds
+
+
+def _background_session_poller() -> None:
+    logger.info("Background session poller started (interval=%ds)", _BG_POLL_INTERVAL)
+    while not _bg_poller_stop.is_set():
+        try:
+            has_running = any(s.get("status") == "running" for s in _sessions.values())
+            has_unnotified = any(not st.get("notified") for st in _stacked_sessions.values())
+            if has_running or has_unnotified:
+                _refresh_pr_statuses()
+        except Exception:
+            logger.exception("Background poller: error while refreshing PR statuses")
+        _bg_poller_stop.wait(_BG_POLL_INTERVAL)
+    logger.info("Background session poller stopped")
+
 
 def _match_prs_to_flags(
     pr_urls: list[str],
@@ -638,6 +669,26 @@ def _send_phase2_notification(stacked: dict, pr_urls: list[str]) -> bool:
             if c and c.maintainer_email:
                 maintainer_email = c.maintainer_email
                 break
+
+    if not maintainer_email:
+        # Fall back to git blame on the first affected file (same as Phase 1).
+        try:
+            from scanner.flag_scanner import get_target_repo_path
+            from scanner.slack_notify import find_flag_author_email
+
+            for fk in flag_keys:
+                c = _find_candidate(fk)
+                if not c:
+                    continue
+                first_file = c.files_affected[0] if c.files_affected else ""
+                if not first_file:
+                    continue
+                maintainer_email = find_flag_author_email(get_target_repo_path(), first_file, fk) or ""
+                if maintainer_email:
+                    logger.info("Phase 2: using git blame author: %s", maintainer_email)
+                    break
+        except Exception:
+            logger.exception("Phase 2: git blame email resolution failed")
 
     if not maintainer_email:
         maintainer_email = os.getenv("SLACK_NOTIFY_EMAIL", "")
