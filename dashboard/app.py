@@ -452,13 +452,15 @@ def _refresh_pr_statuses() -> None:
                         continue
 
                 state_val = devin_status.get("status_enum") or devin_status.get("status", "unknown")
+                is_terminal = state_val in ("finished", "stopped", "blocked", "suspended")
 
-                if state_val in ("finished", "stopped", "blocked", "suspended"):
+                # Check for PRs even while running — Devin can create PRs before the session ends
+                all_pr_urls = extract_all_pr_urls(devin_status)
+
+                if all_pr_urls or is_terminal:
                     stacked = _stacked_sessions.get(sid)
 
                     if stacked:
-                        # Stacked session: extract ALL PR URLs and match by title
-                        all_pr_urls = extract_all_pr_urls(devin_status)
                         stacked_keys = stacked.get("flag_keys", [])
 
                         if all_pr_urls:
@@ -482,13 +484,13 @@ def _refresh_pr_statuses() -> None:
                                     fk_session["status"] = "ready"
                                     logger.info("%s: fallback stacked PR: %s", fk, fallback_url)
 
-                            # Send Phase 2 Slack notification (once)
-                            if not stacked.get("notified"):
+                            # Send Phase 2 Slack notification (once, only when terminal)
+                            if is_terminal and not stacked.get("notified"):
                                 sent = _send_phase2_notification(stacked, all_pr_urls)
                                 if sent:
                                     stacked["notified"] = True
-                        else:
-                            # No PRs found — mark all as error
+                        elif is_terminal:
+                            # Terminal with no PRs — mark all as error
                             for fk in stacked_keys:
                                 fk_session = _sessions.get(fk)
                                 if fk_session and fk_session.get("status") == "running":
@@ -503,7 +505,7 @@ def _refresh_pr_statuses() -> None:
                             session["status"] = "ready"
                             state_changed = True
                             logger.info("%s: Devin finished, PR found: %s", flag_key, found_pr)
-                        else:
+                        elif is_terminal:
                             session["status"] = "error"
                             state_changed = True
                             logger.info("%s: Devin finished but no PR (state=%s)", flag_key, state_val)
