@@ -592,9 +592,9 @@ def api_rebase_next(request: Request):
                 # Try GitHub API merge first (fast, no Devin needed)
                 logger.info("PR #%d (%s): attempting GitHub API merge of main into %s",
                             pr_number, pr_title, branch)
-                merged = merge_main_into_branch(repo_slug, branch)
+                merge_result = merge_main_into_branch(repo_slug, branch)
 
-                if merged:
+                if merge_result is True:
                     results.append({
                         "pr": pr_number,
                         "title": pr_title,
@@ -602,8 +602,17 @@ def api_rebase_next(request: Request):
                         "method": "github_api",
                     })
                     logger.info("PR #%d: successfully merged main via GitHub API", pr_number)
+                elif merge_result is None:
+                    # Non-conflict error (API failure, network, etc.) — skip Devin
+                    logger.warning("PR #%d: GitHub API error (not a conflict), skipping", pr_number)
+                    results.append({
+                        "pr": pr_number,
+                        "title": pr_title,
+                        "action": "failed",
+                        "reason": "GitHub API error (not a merge conflict)",
+                    })
                 else:
-                    # Conflict — dispatch Devin to resolve
+                    # merge_result is False — actual conflict, dispatch Devin
                     logger.info("PR #%d: conflict detected, dispatching Devin to resolve", pr_number)
                     try:
                         session = create_rebase_session(repo_slug, branch, pr_number)

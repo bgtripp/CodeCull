@@ -120,11 +120,12 @@ def list_pull_requests(repo_slug: str, state: str = "open") -> list[dict]:
     return resp.json()
 
 
-def merge_main_into_branch(repo_slug: str, branch: str) -> bool:
+def merge_main_into_branch(repo_slug: str, branch: str) -> bool | None:
     """Merge ``main`` into *branch* using the GitHub API.
 
     Returns ``True`` if the merge succeeded (or was already up-to-date).
     Returns ``False`` if there are merge conflicts that need manual resolution.
+    Returns ``None`` if an unrelated error occurred (API failure, network, etc.).
     """
     owner, repo = _parse_repo_slug(repo_slug)
 
@@ -153,10 +154,10 @@ def merge_main_into_branch(repo_slug: str, branch: str) -> bool:
             branch,
             exc.response.text[:200],
         )
-        return False
+        return None
     except Exception:
         logger.exception("Failed to merge main into %s", branch)
-        return False
+        return None
 
 
 def get_pr_branch(repo_slug: str, pr_number: int) -> str | None:
