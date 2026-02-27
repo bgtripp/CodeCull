@@ -190,3 +190,72 @@ def notify_flag_author(
     ]
 
     return send_dm(slack_user_id, text, blocks)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: PR-ready notification for stacked cleanup PRs
+# ---------------------------------------------------------------------------
+
+def send_pr_ready_notification(
+    email: str,
+    flag_keys: list[str],
+    pr_urls: list[str],
+    dashboard_url: str,
+) -> bool:
+    """DM a maintainer that their stacked cleanup PRs are ready for review.
+
+    This is the Phase 2 notification in the stacked PR flow:
+      Phase 1: "You have N stale flags" (sent after scan)
+      Phase 2: "Your cleanup PRs are ready" (sent when Devin finishes)
+
+    *pr_urls* is a list of GitHub PR URLs (one per flag in the stack).
+
+    Returns True if the DM was sent successfully.
+    """
+    slack_user_id = lookup_slack_user(email)
+    if not slack_user_id:
+        logger.warning("Could not find Slack user for %s", email)
+        return False
+
+    n = len(flag_keys)
+
+    # Build a list of PRs with their Devin Review URLs
+    pr_lines: list[str] = []
+    for i, url in enumerate(pr_urls, 1):
+        review_url = url.replace("github.com", "app.devin.ai/review")
+        pr_lines.append(f"  {i}. <{review_url}|PR #{i}>")
+
+    pr_list_text = "\n".join(pr_lines) if pr_lines else "  (no PRs found)"
+    flag_list = "\n".join(f"  - `{k}`" for k in flag_keys)
+
+    text = (
+        f":white_check_mark: *CodeCull: {n} cleanup PR{'s' if n != 1 else ''} ready for review*\n\n"
+        f"Devin has created a stacked PR chain removing {n} stale flag{'s' if n != 1 else ''}:\n"
+        f"{flag_list}\n\n"
+        f"*PRs (review top-down):*\n"
+        f"{pr_list_text}\n\n"
+        f"Merge from the top of the stack down."
+    )
+
+    # One button per PR in the actions block
+    buttons: list[dict] = []
+    for i, url in enumerate(pr_urls, 1):
+        review_url = url.replace("github.com", "app.devin.ai/review")
+        buttons.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": f"Review PR #{i}"},
+            "action_id": f"review_pr_{i}",
+            "url": review_url,
+            **({"style": "primary"} if i == 1 else {}),
+        })
+
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+    ]
+    if buttons:
+        blocks.append({"type": "actions", "elements": buttons[:5]})  # Slack max 5
+
+    sent = send_dm(slack_user_id, text, blocks)
+    if sent:
+        logger.info("Sent PR-ready Slack DM to %s for %d flags (%d PRs)", email, n, len(pr_urls))
+    return sent

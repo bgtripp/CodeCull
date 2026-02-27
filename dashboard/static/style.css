@@ -584,6 +584,143 @@ code {
     font-size: 0.85em;
 }
 
+/* ---- Select bar ---- */
+
+.select-bar {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    padding: 0.5rem 0;
+}
+
+.select-all-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    user-select: none;
+}
+
+.select-all-label:hover {
+    color: var(--text);
+}
+
+/* ---- Checkboxes ---- */
+
+.flag-checkbox,
+.select-all-label input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    cursor: pointer;
+    position: relative;
+    flex-shrink: 0;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.flag-checkbox:hover,
+.select-all-label input[type="checkbox"]:hover {
+    border-color: var(--accent);
+}
+
+.flag-checkbox:checked,
+.select-all-label input[type="checkbox"]:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.flag-checkbox:checked::after,
+.select-all-label input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 4px;
+    top: 1px;
+    width: 6px;
+    height: 10px;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+.flag-checkbox:indeterminate,
+.select-all-label input[type="checkbox"]:indeterminate {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.flag-checkbox:indeterminate::after,
+.select-all-label input[type="checkbox"]:indeterminate::after {
+    content: '';
+    position: absolute;
+    left: 3px;
+    top: 6px;
+    width: 8px;
+    height: 2px;
+    background: #fff;
+}
+
+/* ---- Floating action bar ---- */
+
+.action-bar {
+    position: fixed;
+    bottom: 2rem;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    background: var(--surface);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    padding: 0.75rem 1.25rem;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    z-index: 100;
+    animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+    from { transform: translateX(-50%) translateY(20px); opacity: 0; }
+    to   { transform: translateX(-50%) translateY(0); opacity: 1; }
+}
+
+.action-bar-count {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.btn-stacked {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    font-family: var(--font);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.btn-stacked:hover {
+    background: var(--accent-hover);
+}
+
+.btn-stacked:disabled {
+    opacity: 0.7;
+    cursor: wait;
+}
+
+.spinner--white {
+    border-color: rgba(255,255,255,0.3);
+    border-top-color: #fff;
+}
+
 /* ---- PR impact ---- */
 
 .pr-impact-row {
@@ -608,4 +745,43 @@ code {
 .pr-files {
     color: var(--text);
     font-weight: 500;
+}
+
+/* ---- Toast notification ---- */
+
+.toast {
+    position: fixed;
+    top: 1.5rem;
+    left: 50%;
+    transform: translateX(-50%) translateY(-20px);
+    padding: 0.75rem 1.25rem;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #fff;
+    z-index: 200;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease, transform 0.25s ease;
+    max-width: 90vw;
+    text-align: center;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+
+.toast.toast--visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+    pointer-events: auto;
+}
+
+.toast--error {
+    background: var(--red, #e55);
+}
+
+.toast--info {
+    background: var(--accent);
+}
+
+.toast--success {
+    background: #27ae60;
 }

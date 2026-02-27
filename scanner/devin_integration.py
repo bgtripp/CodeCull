@@ -85,6 +85,73 @@ Instructions:
 """
 
 
+def _build_stacked_prompt(
+    flags: list[dict],
+    repo: str,
+) -> str:
+    """Build a prompt for removing flags as a true stacked PR chain.
+
+    Each entry in *flags* has keys: flag_key, variation, files.
+
+    Devin will create one branch per flag, each branching off the previous,
+    and open one draft PR per flag targeting the previous branch (first
+    targets ``main``).  The result is a reviewable/mergeable stack.
+    """
+    steps: list[str] = []
+    prev_branch = "main"
+
+    for i, flag in enumerate(flags, 1):
+        flag_key = flag["flag_key"]
+        variation = flag["variation"]
+        files = flag["files"]
+        branch = f"codecull/remove-{flag_key}"
+        file_list = ", ".join(files)
+
+        if variation == "always-on":
+            action = (
+                f"`{flag_key}` is always **ON**. Remove the flag check and keep "
+                "only the 'enabled' / truthy code path. Delete the dead 'else' branch."
+            )
+        else:
+            action = (
+                f"`{flag_key}` is always **OFF**. Remove the flag check and keep "
+                "only the 'disabled' / falsy code path. Delete the dead 'if' branch."
+            )
+
+        pr_title = f"Remove stale flag: {flag_key}"
+        steps.append(
+            f"### Step {i}: {flag_key}\n"
+            f"1. Create branch `{branch}` from `{prev_branch}`.\n"
+            f"2. {action}\n"
+            f"   Files: {file_list}\n"
+            f"3. Remove every call to `is_enabled(\"{flag_key}\")` and the surrounding if/else. "
+            f"Keep the live code path inline.\n"
+            f"4. Remove any imports or config references that are now unused.\n"
+            f"5. Update or remove tests that reference `{flag_key}`.\n"
+            f"6. Commit all changes for this flag.\n"
+            f"7. Push `{branch}` and open a **draft** PR titled \"{pr_title}\" "
+            f"targeting `{prev_branch}`.\n"
+        )
+        prev_branch = branch
+
+    steps_text = "\n".join(steps)
+
+    return f"""You are cleaning up {len(flags)} stale feature flags in the repo `{repo}`.
+
+Create a **stacked PR chain** — one branch and one draft PR per flag.
+Each branch is based on the previous one so changes build on each other.
+
+{steps_text}
+
+**Important rules:**
+- Do NOT change any behaviour — the live code paths must stay identical.
+- Each PR removes exactly ONE flag. Do not combine flags in a single PR.
+- Each PR must target the PREVIOUS branch (except the first, which targets `main`).
+- In each PR description, state which flag was removed and what code path was kept.
+- Make sure each branch builds cleanly (no broken imports, no syntax errors).
+"""
+
+
 _MAX_RETRIES = 2
 _RETRY_BASE_DELAY = 5  # seconds
 
@@ -147,6 +214,44 @@ def create_cleanup_session(
     url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
 
     logger.info("Created Devin session %s for flag %s", session_id, flag_key)
+    return {"session_id": session_id, "url": url}
+
+
+def create_stacked_cleanup_session(
+    flags: list[dict],
+    repo: str,
+) -> dict:
+    """Create a single Devin session that removes multiple flags in one PR.
+
+    *flags* is a list of dicts, each with keys: flag_key, variation, files.
+
+    Returns a dict with 'session_id' and 'url'.
+    Retries automatically on 429 (rate limit) with exponential back-off.
+    """
+    prompt = _build_stacked_prompt(flags, repo)
+    flag_keys = [f["flag_key"] for f in flags]
+    tags = ["CodeCull", "stacked"] + [f"flag:{k}" for k in flag_keys]
+
+    payload = {
+        "prompt": prompt,
+        "idempotent": False,
+        "tags": tags,
+    }
+
+    resp = _post_with_retry(
+        f"{_api_base()}/sessions",
+        headers=_headers(),
+        json=payload,
+    )
+    data = resp.json()
+
+    session_id = data.get("session_id", "")
+    url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
+
+    logger.info(
+        "Created stacked Devin session %s for %d flags: %s",
+        session_id, len(flags), ", ".join(flag_keys),
+    )
     return {"session_id": session_id, "url": url}
 
 
@@ -226,14 +331,24 @@ def stop_codecull_sessions() -> int:
 
 
 def get_session_status(session_id: str) -> dict:
-    """Retrieve the current status of a Devin session."""
+    """Retrieve the current status of a Devin session.
+
+    Uses the list endpoint because the individual ``GET /sessions/{id}``
+    route returns 403 for service-user API keys.  The v3 list endpoint
+    ignores the ``session_id`` query-param filter, so we fetch recent
+    sessions and find the exact match client-side.
+    """
     resp = httpx.get(
-        f"{_api_base()}/sessions/{session_id}",
+        f"{_api_base()}/sessions",
         headers=_headers(),
+        params={"limit": 50},
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.json()
+    for item in resp.json().get("items", []):
+        if item.get("session_id") == session_id:
+            return item
+    raise ValueError(f"Session {session_id} not found in recent sessions")
 
 
 def poll_session_until_done(session_id: str) -> dict:
@@ -245,9 +360,9 @@ def poll_session_until_done(session_id: str) -> dict:
 
     while time.time() < deadline:
         status = get_session_status(session_id)
-        state = status.get("status_enum", "unknown")
+        state = status.get("status_enum") or status.get("status", "unknown")
 
-        if state in ("finished", "stopped", "blocked"):
+        if state in ("finished", "stopped", "blocked", "suspended"):
             logger.info("Session %s reached state: %s", session_id, state)
             return status
 
@@ -301,16 +416,42 @@ Instructions:
 
 def extract_pr_url(session_status: dict) -> str | None:
     """Try to extract a pull request URL from the session result."""
-    # The structured_output or result may contain a PR URL
-    structured = session_status.get("structured_outputs") or []
-    for output in structured:
+    urls = extract_all_pr_urls(session_status)
+    return urls[0] if urls else None
+
+
+def extract_all_pr_urls(session_status: dict) -> list[str]:
+    """Extract ALL pull request URLs from a Devin session result.
+
+    Returns a deduplicated list of GitHub PR URLs found in the session.
+    Checks the v3 list-API ``pull_requests`` field first (list of
+    ``{pr_url, pr_state}`` dicts), then falls back to legacy
+    ``structured_outputs`` and free-text ``result`` scanning.
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+
+    # v3 list-API: "pull_requests" field (preferred)
+    for pr in session_status.get("pull_requests") or []:
+        url = pr.get("pr_url", "")
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    # Legacy: structured_outputs (from individual session endpoint)
+    for output in session_status.get("structured_outputs") or []:
         if "pull_request" in output:
-            return output["pull_request"].get("url")
+            url = output["pull_request"].get("url", "")
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
 
-    # Fallback: scan the last message / result text for a GitHub PR URL
+    # Scan the result text for all GitHub PR URLs
     result_text = session_status.get("result", "") or ""
-    pr_match = re.search(r"https://github\.com/[^\s]+/pull/\d+", result_text)
-    if pr_match:
-        return pr_match.group(0)
+    for match in re.finditer(r"https://github\.com/[^\s)>\]]+/pull/\d+", result_text):
+        url = match.group(0)
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
 
-    return None
+    return urls

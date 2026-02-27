@@ -1,4 +1,4 @@
-"""PR sync job — the main trigger for the CodeCull demo.
+"""PR sync job — the main trigger for the CodeCull pipeline.
 
 Usage::
 
@@ -6,12 +6,13 @@ Usage::
 
 Flow:
   1. Scan the target repo for stale feature flags.
-  2. Dispatch a Devin session for each stale flag (creates cleanup PRs).
-  3. Poll Devin sessions until they complete (up to 30 min).
-  4. Extract PR URLs from completed sessions.
-  5. Fetch PR stats from the GitHub API.
-  6. Write ``.codecull_state.json`` for the dashboard to consume.
-  7. Send a Slack DM: "N PRs ready for review" with a dashboard link.
+  2. Check GitHub for any existing cleanup PRs (from prior Devin runs).
+  3. Fetch PR stats for known PRs.
+  4. Write ``.codecull_state.json`` for the dashboard to consume.
+  5. Send a Slack DM (Phase 1): "N stale flags found — review in dashboard".
+
+Devin dispatch is **not** triggered here — it's user-initiated from the
+dashboard via the "Fix in Stacked PR" button.
 """
 
 from __future__ import annotations
@@ -20,11 +21,6 @@ import logging
 import os
 from pathlib import Path
 
-from scanner.devin_integration import (
-    create_cleanup_session,
-    extract_pr_url,
-    poll_session_until_done,
-)
 from scanner.flag_scanner import FlagCandidate, get_target_repo_path, run_scan
 from scanner.github_stats import discover_cleanup_prs, fetch_pr_stats
 from scanner.slack_notify import find_flag_author_email, lookup_slack_user, send_dm
@@ -34,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def sync_state(state_path: Path | None = None) -> dict:
-    """Run the full sync: scan -> dispatch Devin -> poll -> persist -> Slack.
+    """Run the sync: scan -> discover existing PRs -> persist -> Slack.
 
     Returns the persisted payload (sessions, pr_stats).
     """
@@ -47,12 +43,16 @@ def sync_state(state_path: Path | None = None) -> dict:
             os.getenv("CODECULL_STATE_PATH", str(project_root / ".codecull_state.json"))
         )
 
+    # Load existing stacked_sessions so we never lose them
+    _existing = load_state(state_path)
+    stacked_sessions: dict = _existing.get("stacked_sessions", {}) or {}
+
     # 1. Scan for stale flags
-    logger.info("Step 1/5: Scanning for stale flags...")
+    logger.info("Step 1/4: Scanning for stale flags...")
     candidates = run_scan()
     if not candidates:
         logger.info("No stale flags found — nothing to do.")
-        save_state(state_path, sessions={}, pr_stats={})
+        save_state(state_path, sessions={}, pr_stats={}, stacked_sessions=stacked_sessions)
         return {"sessions": {}, "pr_stats": {}}
 
     logger.info("Found %d stale flag candidate(s)", len(candidates))
@@ -67,14 +67,13 @@ def sync_state(state_path: Path | None = None) -> dict:
     # Merge PRs we already know about from the state file
     for c in candidates:
         existing = existing_sessions.get(c.flag_key, {})
-        if existing.get("pr_url"):
+        if existing.get("pr_url") or existing.get("session_id"):
             sessions[c.flag_key] = existing
 
-    # 3. Discover any existing PRs on GitHub (avoids dispatching Devin
-    #    when cleanup PRs have already been created by a previous run)
+    # 3. Discover any existing PRs on GitHub
     missing_keys = [k for k in flag_keys if not sessions.get(k, {}).get("pr_url")]
     if missing_keys:
-        logger.info("Step 2/5: Checking GitHub for existing cleanup PRs...")
+        logger.info("Step 2/4: Checking GitHub for existing cleanup PRs...")
         try:
             discovered = discover_cleanup_prs(repo_slug, missing_keys)
             for flag_key, info in discovered.items():
@@ -85,57 +84,8 @@ def sync_state(state_path: Path | None = None) -> dict:
         except Exception:
             logger.exception("GitHub PR discovery failed")
 
-    # 4. Dispatch Devin sessions for flags that still don't have a PR
-    need_polling: list[str] = []
-    still_missing = [c for c in candidates if not sessions.get(c.flag_key, {}).get("pr_url")]
-
-    if still_missing:
-        logger.info("Step 3/5: Dispatching Devin for %d flag(s) without PRs...", len(still_missing))
-        for c in still_missing:
-            try:
-                result = create_cleanup_session(
-                    flag_key=c.flag_key,
-                    repo=repo_slug,
-                    variation=c.variation_served,
-                    files=c.files_affected,
-                )
-                sessions[c.flag_key] = {
-                    "session_id": result["session_id"],
-                    "url": result["url"],
-                    "status": "running",
-                    "pr_url": None,
-                }
-                need_polling.append(c.flag_key)
-                logger.info("  -> Session %s created: %s", result["session_id"], result["url"])
-            except Exception:
-                logger.exception("Failed to dispatch Devin for %s", c.flag_key)
-                sessions[c.flag_key] = {"status": "error", "pr_url": None}
-    else:
-        logger.info("Step 3/5: All flags already have PRs — skipping Devin dispatch")
-
-    # 5. Poll newly-created Devin sessions until they complete
-    if need_polling:
-        logger.info("Step 4/5: Polling %d Devin session(s)...", len(need_polling))
-        for flag_key in need_polling:
-            sid = sessions[flag_key].get("session_id")
-            if not sid:
-                continue
-            try:
-                final = poll_session_until_done(sid)
-                pr_url = extract_pr_url(final)
-                sessions[flag_key]["status"] = final.get("status_enum", "finished")
-                if pr_url:
-                    sessions[flag_key]["pr_url"] = pr_url
-                    logger.info("  -> %s: PR found: %s", flag_key, pr_url)
-                else:
-                    sessions[flag_key]["status"] = "error"
-                    logger.warning("  -> %s: session finished but no PR URL found", flag_key)
-            except Exception:
-                logger.exception("Failed to poll session for %s", flag_key)
-                sessions[flag_key]["status"] = "error"
-
-    # 6. Fetch PR stats for all flags with PR URLs
-    logger.info("Step 5/5: Fetching PR stats...")
+    # 4. Fetch PR stats for all flags with PR URLs
+    logger.info("Step 3/4: Fetching PR stats...")
     pr_stats: dict[str, dict] = {}
     for flag_key, sinfo in sessions.items():
         pr_url = sinfo.get("pr_url")
@@ -154,37 +104,40 @@ def sync_state(state_path: Path | None = None) -> dict:
         except Exception:
             logger.exception("Failed to fetch PR stats for %s", flag_key)
 
-    # 7. Persist state
-    save_state(state_path, sessions=sessions, pr_stats=pr_stats)
+    # 5. Persist state (preserve stacked_sessions)
+    save_state(state_path, sessions=sessions, pr_stats=pr_stats, stacked_sessions=stacked_sessions)
     ready_count = sum(1 for s in sessions.values() if s.get("pr_url"))
     logger.info("Wrote state file %s (%d PRs ready)", state_path, ready_count)
 
-    # 8. Send Slack notification
-    _send_slack_ready_notification(candidates, sessions, dashboard_url)
+    # 6. Send Slack Phase 1 notification
+    _send_slack_scan_notification(candidates, sessions, dashboard_url)
 
     return {"sessions": sessions, "pr_stats": pr_stats}
 
 
-def _send_slack_ready_notification(
+def _send_slack_scan_notification(
     candidates: list[FlagCandidate],
     sessions: dict[str, dict],
     dashboard_url: str,
 ) -> None:
-    """DM the flag author(s) a summary: 'N PRs ready for review'.
+    """Phase 1 Slack DM: notify maintainer(s) about stale flags found.
+
+    If some flags already have PRs, mentions how many are ready vs pending.
 
     Owner resolution order:
       1. LaunchDarkly ``maintainer_email`` (from flag metadata)
       2. ``git blame`` on the first affected file
       3. ``SLACK_NOTIFY_EMAIL`` env var (manual fallback)
     """
-    ready = [c for c in candidates if sessions.get(c.flag_key, {}).get("pr_url")]
-    if not ready:
-        logger.info("No ready PRs; skipping Slack notification")
+    if not candidates:
         return
+
+    ready = [c for c in candidates if sessions.get(c.flag_key, {}).get("pr_url")]
+    pending = [c for c in candidates if not sessions.get(c.flag_key, {}).get("pr_url")]
 
     # 1. Try LaunchDarkly maintainer_email from flag metadata
     email = ""
-    first = ready[0]
+    first = candidates[0]
     if first.maintainer_email:
         email = first.maintainer_email
         logger.info("Using LaunchDarkly maintainer_email: %s", email)
@@ -212,16 +165,36 @@ def _send_slack_ready_notification(
         logger.warning("Could not find Slack user for %s", email)
         return
 
-    n = len(ready)
-    flag_list = "\n".join(f"  - `{c.flag_key}`" for c in ready)
+    n_total = len(candidates)
+    n_ready = len(ready)
+    n_pending = len(pending)
 
-    text = (
-        f":recycle: *CodeCull: {n} PR{'s' if n != 1 else ''} ready for review*\n\n"
-        f"Dead code cleanup PRs are ready for:\n{flag_list}"
+    flag_list = "\n".join(
+        f"  - `{c.flag_key}` ({c.days_stale} days stale, {c.variation_served})"
+        for c in candidates
     )
 
+    if n_ready > 0 and n_pending > 0:
+        summary = (
+            f":recycle: *CodeCull: {n_total} stale flag{'s' if n_total != 1 else ''} found*\n\n"
+            f"{n_ready} already have cleanup PRs, {n_pending} need review:\n{flag_list}\n\n"
+            f"Open the dashboard to select which flags to fix."
+        )
+    elif n_ready == n_total:
+        summary = (
+            f":white_check_mark: *CodeCull: all {n_total} stale flags have cleanup PRs*\n\n"
+            f"{flag_list}\n\n"
+            f"Open the dashboard to review them."
+        )
+    else:
+        summary = (
+            f":recycle: *CodeCull: {n_total} stale flag{'s' if n_total != 1 else ''} found*\n\n"
+            f"{flag_list}\n\n"
+            f"Open the dashboard to select which flags to fix."
+        )
+
     blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": summary}},
         {
             "type": "actions",
             "elements": [
@@ -236,5 +209,5 @@ def _send_slack_ready_notification(
         },
     ]
 
-    send_dm(slack_user_id, text, blocks)
-    logger.info("Sent Slack DM: %d PRs ready", n)
+    send_dm(slack_user_id, summary, blocks)
+    logger.info("Sent Phase 1 Slack DM: %d flags found (%d ready)", n_total, n_ready)

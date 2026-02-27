@@ -4,6 +4,8 @@
 
 {% block content %}
 {% set visible = candidates|selectattr('status', 'ne', 'skipped')|list %}
+{% set pending = visible|selectattr('status', 'equalto', 'pending')|list %}
+{% set in_progress = visible|selectattr('status', 'equalto', 'in_progress')|list %}
 {% set ready = visible|selectattr('status', 'equalto', 'done')|list %}
 
 <div class="toolbar">
@@ -14,7 +16,13 @@
         {% endif %}
     </div>
     <div class="toolbar-right">
-        <span class="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready for review</span>
+        {% if ready %}
+        <span class="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready</span>
+        {% elif in_progress %}
+        <span class="candidate-count">Devin working&hellip;</span>
+        {% elif pending %}
+        <span class="candidate-count">{{ pending|length }} flag{{ 's' if pending|length != 1 }} to review</span>
+        {% endif %}
         <button id="reset-demo-btn" class="btn btn-reset" title="Reset LogiOps to pre-cleanup state for re-demoing">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
             Reset Demo
@@ -28,11 +36,23 @@
 </div>
 {% endif %}
 
+{% if pending %}
+<div class="select-bar">
+    <label class="select-all-label">
+        <input type="checkbox" id="select-all-cb" />
+        <span>Select all</span>
+    </label>
+</div>
+{% endif %}
+
 <div class="card-list">
 {% for c in visible %}
-    <div class="card card--{{ c.status }}">
+    <div class="card card--{{ c.status }}" data-flag="{{ c.flag_key }}">
         <div class="card-header">
             <div class="flag-info">
+                {% if c.status == 'pending' %}
+                <input type="checkbox" class="flag-checkbox" value="{{ c.flag_key }}" />
+                {% endif %}
                 <h3 class="flag-key">{{ c.flag_key }}</h3>
                 <span class="badge badge--{{ c.variation_served }}">{{ c.variation_served }}</span>
                 <span class="badge badge--age">{{ c.days_stale }} days stale</span>
@@ -43,7 +63,7 @@
                 {% elif c.status == "in_progress" %}
                     <span class="status-dot status-dot--progress"></span> Devin working&hellip;
                 {% elif c.status == "pending" %}
-                    <span class="status-dot status-dot--pending"></span> Queued
+                    <span class="status-dot status-dot--pending"></span> Pending
                 {% elif c.status == "error" %}
                     <span class="status-dot status-dot--error"></span> Error
                 {% endif %}
@@ -80,15 +100,10 @@
         {% if sessions.get(c.flag_key) %}
         <div class="session-info">
             {% set s = sessions[c.flag_key] %}
-            {% if s.get('status') == 'queued' %}
+            {% if c.status == 'in_progress' and s.get('session_id') %}
             <div class="session-progress">
                 <span class="spinner"></span>
-                <span>Queued &mdash; waiting for capacity&hellip;</span>
-            </div>
-            {% elif c.status == 'in_progress' and s.get('session_id') %}
-            <div class="session-progress">
-                <span class="spinner"></span>
-                <span>Devin is creating a cleanup PR&hellip;</span>
+                <span>Devin is creating stacked cleanup PRs&hellip;</span>
                 <a href="{{ s.url }}" target="_blank" class="session-link">View session</a>
             </div>
             {% elif c.status == 'error' and s.get('session_id') %}
@@ -117,11 +132,122 @@
     </div>
 {% endfor %}
 </div>
+
+<!-- Toast notification -->
+<div id="toast" class="toast"></div>
+
+<!-- Floating action bar — visible when checkboxes are selected -->
+<div id="action-bar" class="action-bar" style="display:none;">
+    <span id="action-bar-count" class="action-bar-count">0 flags selected</span>
+    <button id="fix-stacked-btn" class="btn btn-stacked">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+        Fix in Stacked PR
+    </button>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
-// Auto-refresh status for in-progress flags
+// ---------------------------------------------------------------------------
+// Toast helper
+// ---------------------------------------------------------------------------
+function showToast(msg, type) {
+    type = type || 'info';
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = 'toast toast--' + type + ' toast--visible';
+    clearTimeout(el._tid);
+    el._tid = setTimeout(function() { el.classList.remove('toast--visible'); }, 4000);
+}
+
+// ---------------------------------------------------------------------------
+// Checkbox selection + floating action bar
+// ---------------------------------------------------------------------------
+(function() {
+    const checkboxes = document.querySelectorAll('.flag-checkbox');
+    const selectAllCb = document.getElementById('select-all-cb');
+    const actionBar = document.getElementById('action-bar');
+    const countEl = document.getElementById('action-bar-count');
+    const fixBtn = document.getElementById('fix-stacked-btn');
+
+    if (!checkboxes.length) return;
+
+    function updateBar() {
+        const checked = document.querySelectorAll('.flag-checkbox:checked');
+        const n = checked.length;
+        if (n > 0) {
+            actionBar.style.display = 'flex';
+            countEl.textContent = n + ' flag' + (n !== 1 ? 's' : '') + ' selected';
+        } else {
+            actionBar.style.display = 'none';
+        }
+        // Update select-all state
+        if (selectAllCb) {
+            selectAllCb.checked = n === checkboxes.length && n > 0;
+            selectAllCb.indeterminate = n > 0 && n < checkboxes.length;
+        }
+    }
+
+    checkboxes.forEach(function(cb) {
+        cb.addEventListener('change', updateBar);
+    });
+
+    if (selectAllCb) {
+        selectAllCb.addEventListener('change', function() {
+            checkboxes.forEach(function(cb) {
+                cb.checked = selectAllCb.checked;
+            });
+            updateBar();
+        });
+    }
+
+    // Fix in Stacked PR button
+    if (fixBtn) {
+        fixBtn.addEventListener('click', async function() {
+            const checked = document.querySelectorAll('.flag-checkbox:checked');
+            const flagKeys = Array.from(checked).map(function(cb) { return cb.value; });
+
+            if (flagKeys.length === 0) return;
+
+            fixBtn.disabled = true;
+            fixBtn.innerHTML = '<span class="spinner spinner--white"></span> Dispatching Devin\u2026';
+
+            try {
+                const resp = await fetch('/api/fix-selected', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({flag_keys: flagKeys}),
+                });
+
+                    if (resp.status === 429) {
+                        showToast('Devin API rate limit \u2014 try again in a few minutes.', 'error');
+                        fixBtn.disabled = false;
+                        fixBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Fix in Stacked PR';
+                        return;
+                    }
+
+                    if (!resp.ok) {
+                        const err = await resp.json();
+                        showToast(err.detail || 'Something went wrong', 'error');
+                        fixBtn.disabled = false;
+                        fixBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Fix in Stacked PR';
+                        return;
+                    }
+
+                location.reload();
+            } catch(e) {
+                showToast('Failed: ' + e.message, 'error');
+                fixBtn.disabled = false;
+                fixBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Fix in Stacked PR';
+            }
+        });
+    }
+})();
+
+// ---------------------------------------------------------------------------
+// Auto-refresh for in-progress sessions
+// ---------------------------------------------------------------------------
 (function() {
     const inProgress = document.querySelectorAll('.card--in_progress');
     if (inProgress.length === 0) return;
@@ -131,52 +257,41 @@
     }, 15000);
 })();
 
+// ---------------------------------------------------------------------------
 // Reset Demo button
+// ---------------------------------------------------------------------------
 (function() {
     const btn = document.getElementById('reset-demo-btn');
     if (!btn) return;
 
+    const resetIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+
     btn.addEventListener('click', async function() {
-        if (!confirm('Reset the demo? This will:\n\n' +
-            '1. Restore all feature flag references in LogiOps\n' +
-            '2. Re-create stale flags in the flag service\n' +
-            '3. Close any open cleanup PRs\n' +
-            '4. Dispatch Devin to create new cleanup PRs\n\n' +
-            'This takes ~30-45 seconds. Continue?')) return;
-
         btn.disabled = true;
-
-        function resetBtn() {
-            btn.disabled = false;
-            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg> Reset Demo';
-        }
+        btn.innerHTML = '<span class="spinner"></span> Resetting\u2026';
 
         try {
-            // Phase 1: Reset files, flags, close PRs (~6s)
-            btn.innerHTML = '<span class="spinner"></span> Resetting files\u2026';
-            const r1 = await fetch('/api/reset-demo', {method: 'POST'});
-            const d1 = await r1.json();
+            const r = await fetch('/api/reset-demo', {method: 'POST'});
+            const d = await r.json();
 
-            if (d1.status === 'error') {
-                alert('Reset failed: ' + d1.message);
-                resetBtn();
+            if (d.status === 'error') {
+                showToast('Reset failed: ' + d.message, 'error');
+                btn.disabled = false;
+                btn.innerHTML = resetIcon + ' Reset Demo';
                 return;
             }
-            if (d1.status === 'already_running') {
-                alert(d1.message);
-                resetBtn();
+            if (d.status === 'already_running') {
+                showToast(d.message, 'info');
+                btn.disabled = false;
+                btn.innerHTML = resetIcon + ' Reset Demo';
                 return;
             }
-
-            // Phase 2: Stop old sessions + dispatch Devin (~20-30s)
-            btn.innerHTML = '<span class="spinner"></span> Dispatching Devin\u2026';
-            const r2 = await fetch('/api/reset-demo/dispatch', {method: 'POST'});
-            const d2 = await r2.json();
 
             location.reload();
         } catch(e) {
-            alert('Failed to reset: ' + e.message);
-            resetBtn();
+            showToast('Failed to reset: ' + e.message, 'error');
+            btn.disabled = false;
+            btn.innerHTML = resetIcon + ' Reset Demo';
         }
     });
 })();
