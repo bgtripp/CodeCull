@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -659,68 +659,49 @@ def api_rebase_status(request: Request):
 # ---------------------------------------------------------------------------
 
 _reset_lock = threading.Lock()
-_reset_status: dict = {"running": False, "last_run": None, "results": None, "error": None}
 
 
 @app.post("/api/reset-demo")
 def api_reset_demo(request: Request):
-    """Reset the demo to its initial state.
+    """Reset the demo to its initial state (synchronous).
 
     Restores LogiOps source files, re-creates stale flags in Unleash,
     closes open cleanup PRs, and clears the dashboard state.
 
-    Runs in a background thread; poll ``GET /api/reset-demo/status``.
+    Runs synchronously (~10-15 s) so the response contains the full
+    result.  This avoids Fly.io machine-suspend issues that caused
+    background-thread state to be lost between requests.
     """
     _check_auth(request)
 
-    if _reset_status["running"]:
-        return {"status": "already_running", "message": "A reset is already in progress."}
-
     if not _reset_lock.acquire(blocking=False):
-        return {"status": "already_running", "message": "A reset is already in progress."}
+        return JSONResponse(
+            {"status": "already_running", "message": "A reset is already in progress."},
+            status_code=409,
+        )
 
-    _reset_status["running"] = True
-    _reset_status["error"] = None
-    _reset_status["results"] = None
+    global _candidates, _sessions, _pr_stats, _last_scan_time
+    try:
+        results = run_demo_reset()
 
-    def _reset_worker() -> None:
-        global _candidates, _sessions, _pr_stats, _last_scan_time
-        try:
-            results = run_demo_reset()
+        # Clear all dashboard state
+        _sessions.clear()
+        _pr_stats.clear()
+        _candidates = []
+        save_state(_STATE_PATH, _sessions, _pr_stats)
 
-            # Clear all dashboard state
-            _sessions.clear()
-            _pr_stats.clear()
-            _candidates = []
-            save_state(_STATE_PATH, _sessions, _pr_stats)
+        # Re-scan to pick up restored flags
+        _candidates = run_scan()
+        _last_scan_time = datetime.now(timezone.utc)
+        _apply_state_to_candidates(_candidates)
 
-            # Re-scan to pick up restored flags
-            _candidates = run_scan()
-            _last_scan_time = datetime.now(timezone.utc)
-            _apply_state_to_candidates(_candidates)
-
-            _reset_status["results"] = results
-            _reset_status["error"] = None
-            logger.info("Demo reset completed successfully")
-        except Exception as exc:
-            logger.exception("Demo reset failed")
-            _reset_status["error"] = str(exc)
-        finally:
-            _reset_status["running"] = False
-            _reset_status["last_run"] = datetime.now(timezone.utc).isoformat()
-
-    def _locked_reset_worker() -> None:
-        try:
-            _reset_worker()
-        finally:
-            _reset_lock.release()
-
-    threading.Thread(target=_locked_reset_worker, daemon=True).start()
-    return {"status": "started", "message": "Demo reset started in background."}
-
-
-@app.get("/api/reset-demo/status")
-def api_reset_demo_status(request: Request):
-    """Check the status of the last/current demo reset."""
-    _check_auth(request)
-    return _reset_status
+        logger.info("Demo reset completed successfully")
+        return {"status": "done", "results": results}
+    except Exception as exc:
+        logger.exception("Demo reset failed")
+        return JSONResponse(
+            {"status": "error", "message": str(exc)},
+            status_code=500,
+        )
+    finally:
+        _reset_lock.release()

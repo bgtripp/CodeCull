@@ -137,7 +137,7 @@
             '2. Re-create stale flags in the flag service\n' +
             '3. Close any open cleanup PRs\n' +
             '4. Clear the dashboard state\n\n' +
-            'Continue?')) return;
+            'This takes ~15 seconds. Continue?')) return;
 
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span> Resetting\u2026';
@@ -146,37 +146,23 @@
             const resp = await fetch('/api/reset-demo', {method: 'POST'});
             const data = await resp.json();
 
-            if (data.status === 'started' || data.status === 'already_running') {
-                btn.innerHTML = '<span class="spinner"></span> Resetting\u2026';
-                // Poll until done
-                const poll = setInterval(async function() {
-                    try {
-                        const sr = await fetch('/api/reset-demo/status');
-                        const sd = await sr.json();
-                        if (!sd.running) {
-                            clearInterval(poll);
-                            if (sd.error) {
-                                alert('Reset failed: ' + sd.error);
-                                btn.disabled = false;
-                                btn.innerHTML = 'Reset Demo';
-                            } else {
-                                location.reload();
-                            }
-                        }
-                    } catch(e) {
-                        clearInterval(poll);
-                        alert('Error polling reset status');
-                        btn.disabled = false;
-                        btn.innerHTML = 'Reset Demo';
-                    }
-                }, 3000);
+            if (data.status === 'done') {
+                location.reload();
+            } else if (data.status === 'error') {
+                alert('Reset failed: ' + data.message);
+                btn.disabled = false;
+                btn.innerHTML = 'Reset Demo';
+            } else if (data.status === 'already_running') {
+                alert(data.message);
+                btn.disabled = false;
+                btn.innerHTML = 'Reset Demo';
             } else {
                 alert('Unexpected response: ' + JSON.stringify(data));
                 btn.disabled = false;
                 btn.innerHTML = 'Reset Demo';
             }
         } catch(e) {
-            alert('Failed to start reset: ' + e.message);
+            alert('Failed to reset: ' + e.message);
             btn.disabled = false;
             btn.innerHTML = 'Reset Demo';
         }
