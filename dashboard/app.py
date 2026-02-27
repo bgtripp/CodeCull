@@ -548,6 +548,28 @@ def _refresh_pr_statuses() -> None:
         _candidates = [c for c in _candidates if c.flag_key not in keys_to_remove]
         state_changed = True
 
+    # Catch-up: send Slack notifications for stacked sessions where all flags
+    # already have pr_url set but notification was never sent (e.g. PRs were
+    # matched on a previous deployment that didn't have this notification fix).
+    for sid, stacked in _stacked_sessions.items():
+        if stacked.get("notified"):
+            continue
+        stacked_keys = stacked.get("flag_keys", [])
+        pr_urls_for_stack: list[str] = []
+        for fk in stacked_keys:
+            fk_session = _sessions.get(fk)
+            if fk_session and fk_session.get("pr_url"):
+                pr_urls_for_stack.append(fk_session["pr_url"])
+        # Deduplicate — fallback URLs may have been assigned for unmatched
+        # flags; only notify when we have enough *distinct* PRs.
+        unique_pr_urls = list(dict.fromkeys(pr_urls_for_stack))
+        if len(unique_pr_urls) >= len(stacked_keys) and unique_pr_urls:
+            logger.info("Catch-up: sending Phase 2 Slack for stacked session %s", sid)
+            sent = _send_phase2_notification(stacked, unique_pr_urls)
+            if sent:
+                stacked["notified"] = True
+                state_changed = True
+
     if state_changed:
         # Re-apply statuses and persist
         _apply_state_to_candidates(_candidates)
