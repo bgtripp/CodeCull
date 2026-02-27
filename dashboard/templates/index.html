@@ -212,7 +212,20 @@ function showToast(msg, type) {
 
             card.style.display = show ? '' : 'none';
             if (show) visibleCount++;
+
+            // Uncheck hidden checkboxes so they aren't accidentally submitted
+            if (!show) {
+                var cb = card.querySelector('.flag-checkbox');
+                if (cb) cb.checked = false;
+            }
         });
+
+        // Sync checkbox action bar after filter change
+        var actionBar = document.getElementById('action-bar');
+        if (actionBar) {
+            var anyChecked = document.querySelectorAll('.flag-checkbox:checked').length;
+            if (!anyChecked) actionBar.style.display = 'none';
+        }
 
         // Show/hide empty states
         var filterEmpty = document.getElementById('filter-empty-state');
@@ -277,10 +290,15 @@ function showToast(msg, type) {
         } else {
             actionBar.style.display = 'none';
         }
-        // Update select-all state
+        // Update select-all state (only count visible checkboxes)
         if (selectAllCb) {
-            selectAllCb.checked = n === checkboxes.length && n > 0;
-            selectAllCb.indeterminate = n > 0 && n < checkboxes.length;
+            var visibleCbs = Array.from(checkboxes).filter(function(cb) {
+                var card = cb.closest('.card');
+                return card && card.style.display !== 'none';
+            });
+            var visibleChecked = visibleCbs.filter(function(cb) { return cb.checked; }).length;
+            selectAllCb.checked = visibleChecked === visibleCbs.length && visibleCbs.length > 0;
+            selectAllCb.indeterminate = visibleChecked > 0 && visibleChecked < visibleCbs.length;
         }
     }
 
@@ -291,7 +309,10 @@ function showToast(msg, type) {
     if (selectAllCb) {
         selectAllCb.addEventListener('change', function() {
             checkboxes.forEach(function(cb) {
-                cb.checked = selectAllCb.checked;
+                var card = cb.closest('.card');
+                if (card && card.style.display !== 'none') {
+                    cb.checked = selectAllCb.checked;
+                }
             });
             updateBar();
         });
@@ -300,8 +321,12 @@ function showToast(msg, type) {
     // Fix in Stacked PR button
     if (fixBtn) {
         fixBtn.addEventListener('click', async function() {
-            const checked = document.querySelectorAll('.flag-checkbox:checked');
-            const flagKeys = Array.from(checked).map(function(cb) { return cb.value; });
+            // Only submit visible checked flags (respect maintainer filter)
+            const checked = Array.from(document.querySelectorAll('.flag-checkbox:checked')).filter(function(cb) {
+                var card = cb.closest('.card');
+                return card && card.style.display !== 'none';
+            });
+            const flagKeys = checked.map(function(cb) { return cb.value; });
 
             if (flagKeys.length === 0) return;
 
