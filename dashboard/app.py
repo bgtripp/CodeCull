@@ -154,6 +154,13 @@ BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
+
+@app.get("/health")
+async def health():
+    """Lightweight health-check used by the keepalive self-ping."""
+    return {"status": "ok"}
+
+
 # ---------------------------------------------------------------------------
 # Email OTP Auth
 # ---------------------------------------------------------------------------
@@ -395,6 +402,18 @@ async def flag_status(request: Request, flag_key: str):
 _BG_POLL_INTERVAL = int(os.getenv("BG_POLL_INTERVAL", "30"))  # seconds
 
 
+def _keepalive_ping() -> None:
+    """Hit our own public URL so Fly.io sees HTTP traffic and won't auto-suspend."""
+    dashboard_url = os.getenv("DASHBOARD_URL", "")
+    if not dashboard_url:
+        return
+    try:
+        httpx.get(f"{dashboard_url.rstrip('/')}/health", timeout=10)
+        logger.debug("Keepalive ping sent to %s/health", dashboard_url)
+    except Exception:
+        logger.debug("Keepalive ping failed (non-critical)")
+
+
 def _background_session_poller() -> None:
     logger.info("Background session poller started (interval=%ds)", _BG_POLL_INTERVAL)
     while not _bg_poller_stop.is_set():
@@ -404,6 +423,8 @@ def _background_session_poller() -> None:
             if has_running or has_unnotified:
                 with _refresh_lock:
                     _refresh_pr_statuses()
+                # Keep Fly machine alive while work is pending
+                _keepalive_ping()
         except Exception:
             logger.exception("Background poller: error while refreshing PR statuses")
         _bg_poller_stop.wait(_BG_POLL_INTERVAL)
