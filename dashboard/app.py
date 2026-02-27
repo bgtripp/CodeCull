@@ -418,11 +418,12 @@ def _background_session_poller() -> None:
     logger.info("Background session poller started (interval=%ds)", _BG_POLL_INTERVAL)
     while not _bg_poller_stop.is_set():
         try:
-            has_running = any(s.get("status") == "running" for s in _sessions.values())
-            has_unnotified = any(not st.get("notified") for st in _stacked_sessions.values())
-            if has_running or has_unnotified:
-                with _refresh_lock:
+            with _refresh_lock:
+                has_running = any(s.get("status") == "running" for s in _sessions.values())
+                has_unnotified = any(not st.get("notified") for st in _stacked_sessions.values())
+                if has_running or has_unnotified:
                     _refresh_pr_statuses()
+            if has_running or has_unnotified:
                 # Keep Fly machine alive while work is pending
                 _keepalive_ping()
         except Exception:
@@ -855,24 +856,25 @@ def api_fix_selected(request: Request, flag_keys: list[str] = Body(..., embed=Tr
     session_id = result["session_id"]
     session_url = result["url"]
 
-    # Register the stacked session
-    _stacked_sessions[session_id] = {
-        "flag_keys": flag_keys,
-        "maintainer_email": maintainer_email,
-        "notified": False,
-    }
-
-    # Point all selected flags to this session
-    for fk in flag_keys:
-        _sessions[fk] = {
-            "session_id": session_id,
-            "url": session_url,
-            "status": "running",
-            "pr_url": None,
+    # Register the stacked session (under lock to avoid racing the poller)
+    with _refresh_lock:
+        _stacked_sessions[session_id] = {
+            "flag_keys": flag_keys,
+            "maintainer_email": maintainer_email,
+            "notified": False,
         }
 
-    _apply_state_to_candidates(_candidates)
-    save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
+        # Point all selected flags to this session
+        for fk in flag_keys:
+            _sessions[fk] = {
+                "session_id": session_id,
+                "url": session_url,
+                "status": "running",
+                "pr_url": None,
+            }
+
+        _apply_state_to_candidates(_candidates)
+        save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
 
     logger.info(
         "Dispatched stacked Devin session %s for %d flags: %s",
@@ -903,20 +905,22 @@ def _run_sync_background() -> None:
     try:
         sync_state(state_path=_STATE_PATH)
         # Reload dashboard in-memory state from the updated file
-        _candidates = run_scan()
-        _last_scan_time = datetime.now(timezone.utc)
+        new_candidates = run_scan()
         state = load_state(_STATE_PATH)
-        _sessions = state.get("sessions", {}) or {}
-        _pr_stats = state.get("pr_stats", {}) or {}
-        _stacked_sessions = state.get("stacked_sessions", {}) or {}
-        _apply_state_to_candidates(_candidates)
-        _candidates.sort(
-            key=lambda c: (
-                _pr_stats.get(c.flag_key, {}).get("deletions", 0),
-                c.days_stale,
-            ),
-            reverse=True,
-        )
+        with _refresh_lock:
+            _candidates = new_candidates
+            _last_scan_time = datetime.now(timezone.utc)
+            _sessions = state.get("sessions", {}) or {}
+            _pr_stats = state.get("pr_stats", {}) or {}
+            _stacked_sessions = state.get("stacked_sessions", {}) or {}
+            _apply_state_to_candidates(_candidates)
+            _candidates.sort(
+                key=lambda c: (
+                    _pr_stats.get(c.flag_key, {}).get("deletions", 0),
+                    c.days_stale,
+                ),
+                reverse=True,
+            )
         _sync_status["result"] = {
             "prs_ready": sum(1 for s in _sessions.values() if s.get("pr_url")),
             "candidates": len(_candidates),
@@ -1148,17 +1152,17 @@ def api_reset_demo(request: Request):
     try:
         results = run_demo_reset()
 
-        # Clear all dashboard state
-        _sessions.clear()
-        _pr_stats.clear()
-        _stacked_sessions.clear()
-        _candidates = []
-        save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
+        # Clear all dashboard state (under lock to avoid racing the poller)
+        with _refresh_lock:
+            _sessions.clear()
+            _pr_stats.clear()
+            _stacked_sessions.clear()
+            _candidates = []
+            save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
 
         # Re-scan to pick up restored flags
-        _candidates = run_scan()
+        new_candidates = run_scan()
         _last_scan_time = datetime.now(timezone.utc)
-        _apply_state_to_candidates(_candidates)
 
         # Send Phase 1 Slack notification (non-blocking)
         try:
@@ -1168,9 +1172,11 @@ def api_reset_demo(request: Request):
 
         # Reload state after sync (sync may have found existing PRs)
         state = load_state(_STATE_PATH)
-        _sessions.update(state.get("sessions", {}))
-        _pr_stats.update(state.get("pr_stats", {}))
-        _apply_state_to_candidates(_candidates)
+        with _refresh_lock:
+            _candidates = new_candidates
+            _sessions.update(state.get("sessions", {}))
+            _pr_stats.update(state.get("pr_stats", {}))
+            _apply_state_to_candidates(_candidates)
 
         logger.info("Demo reset completed successfully — %d candidates", len(_candidates))
         return {"status": "done", "results": results, "candidates": len(_candidates)}
