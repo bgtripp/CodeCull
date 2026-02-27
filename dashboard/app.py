@@ -66,6 +66,9 @@ _stacked_sessions: dict[str, dict] = {}
 # Background poller shutdown event
 _bg_poller_stop = threading.Event()
 
+# Prevent concurrent state refreshes (background poller vs web requests)
+_refresh_lock = threading.Lock()
+
 
 _STATE_PATH = Path(os.getenv("CODECULL_STATE_PATH", str(_PROJECT_ROOT / ".codecull_state.json")))
 
@@ -352,7 +355,8 @@ def index(request: Request):
     if not email:
         return RedirectResponse(url="/auth/login", status_code=303)
 
-    _refresh_pr_statuses()
+    with _refresh_lock:
+        _refresh_pr_statuses()
 
     return templates.TemplateResponse(
         "index.html",
@@ -398,7 +402,8 @@ def _background_session_poller() -> None:
             has_running = any(s.get("status") == "running" for s in _sessions.values())
             has_unnotified = any(not st.get("notified") for st in _stacked_sessions.values())
             if has_running or has_unnotified:
-                _refresh_pr_statuses()
+                with _refresh_lock:
+                    _refresh_pr_statuses()
         except Exception:
             logger.exception("Background poller: error while refreshing PR statuses")
         _bg_poller_stop.wait(_BG_POLL_INTERVAL)

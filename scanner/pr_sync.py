@@ -125,7 +125,7 @@ def _send_slack_scan_notification(
     If some flags already have PRs, mentions how many are ready vs pending.
 
     Owner resolution order:
-      1. LaunchDarkly ``maintainer_email`` (from flag metadata)
+      1. ``maintainer_email`` (from flag metadata)
       2. ``git blame`` on the first affected file
       3. ``SLACK_NOTIFY_EMAIL`` env var (manual fallback)
     """
@@ -135,12 +135,12 @@ def _send_slack_scan_notification(
     ready = [c for c in candidates if sessions.get(c.flag_key, {}).get("pr_url")]
     pending = [c for c in candidates if not sessions.get(c.flag_key, {}).get("pr_url")]
 
-    # 1. Try LaunchDarkly maintainer_email from flag metadata
+    # 1. Try maintainer_email from flag metadata
     email = ""
     first = candidates[0]
     if first.maintainer_email:
         email = first.maintainer_email
-        logger.info("Using LaunchDarkly maintainer_email: %s", email)
+        logger.info("Using flag metadata maintainer_email: %s", email)
 
     # 2. Fall back to git blame
     if not email:
