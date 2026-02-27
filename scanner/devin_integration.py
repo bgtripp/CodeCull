@@ -85,6 +85,58 @@ Instructions:
 """
 
 
+def _build_stacked_prompt(
+    flags: list[dict],
+    repo: str,
+) -> str:
+    """Build a prompt for removing multiple flags in a single stacked PR.
+
+    Each entry in *flags* has keys: flag_key, variation, files.
+    """
+    sections: list[str] = []
+    all_files: set[str] = set()
+
+    for flag in flags:
+        flag_key = flag["flag_key"]
+        variation = flag["variation"]
+        files = flag["files"]
+        all_files.update(files)
+
+        if variation == "always-on":
+            action = (
+                f"  `{flag_key}` is always **ON**. Remove the flag check and keep "
+                "only the 'enabled' / truthy code path. Delete the dead 'else' branch."
+            )
+        else:
+            action = (
+                f"  `{flag_key}` is always **OFF**. Remove the flag check and keep "
+                "only the 'disabled' / falsy code path. Delete the dead 'if' branch."
+            )
+
+        file_list = ", ".join(files)
+        sections.append(f"- {action}\n    Files: {file_list}")
+
+    flag_list = "\n".join(sections)
+    flag_keys = [f["flag_key"] for f in flags]
+    pr_title = "Remove stale flags: " + ", ".join(flag_keys)
+
+    return f"""You are cleaning up {len(flags)} stale feature flags in the repo `{repo}`.
+
+Flags to remove:
+{flag_list}
+
+Instructions:
+1. For EACH flag listed above, remove every call to `is_enabled("<flag_key>")` and the surrounding if/else.
+2. Keep the live code path inline (no conditional) for each flag.
+3. Remove any imports or config references that become unused after ALL flags are removed.
+4. Update or remove tests that reference any of these flags.
+5. Do NOT change any behaviour — the live code paths must stay identical.
+6. Make all changes in a SINGLE commit and open a **draft** pull request.
+7. PR title: "{pr_title}"
+8. In the PR description, list each flag removed and what code path was kept.
+"""
+
+
 _MAX_RETRIES = 2
 _RETRY_BASE_DELAY = 5  # seconds
 
@@ -147,6 +199,44 @@ def create_cleanup_session(
     url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
 
     logger.info("Created Devin session %s for flag %s", session_id, flag_key)
+    return {"session_id": session_id, "url": url}
+
+
+def create_stacked_cleanup_session(
+    flags: list[dict],
+    repo: str,
+) -> dict:
+    """Create a single Devin session that removes multiple flags in one PR.
+
+    *flags* is a list of dicts, each with keys: flag_key, variation, files.
+
+    Returns a dict with 'session_id' and 'url'.
+    Retries automatically on 429 (rate limit) with exponential back-off.
+    """
+    prompt = _build_stacked_prompt(flags, repo)
+    flag_keys = [f["flag_key"] for f in flags]
+    tags = ["CodeCull", "stacked"] + [f"flag:{k}" for k in flag_keys]
+
+    payload = {
+        "prompt": prompt,
+        "idempotent": False,
+        "tags": tags,
+    }
+
+    resp = _post_with_retry(
+        f"{_api_base()}/sessions",
+        headers=_headers(),
+        json=payload,
+    )
+    data = resp.json()
+
+    session_id = data.get("session_id", "")
+    url = data.get("url", f"https://app.devin.ai/sessions/{session_id}")
+
+    logger.info(
+        "Created stacked Devin session %s for %d flags: %s",
+        session_id, len(flags), ", ".join(flag_keys),
+    )
     return {"session_id": session_id, "url": url}
 
 

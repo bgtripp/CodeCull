@@ -190,3 +190,61 @@ def notify_flag_author(
     ]
 
     return send_dm(slack_user_id, text, blocks)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: PR-ready notification for stacked cleanup PRs
+# ---------------------------------------------------------------------------
+
+def send_pr_ready_notification(
+    email: str,
+    flag_keys: list[str],
+    pr_url: str,
+    dashboard_url: str,
+) -> bool:
+    """DM a maintainer that their stacked cleanup PR is ready for review.
+
+    This is the Phase 2 notification in the stacked PR flow:
+      Phase 1: "You have N stale flags" (sent after scan)
+      Phase 2: "Your cleanup PR is ready" (sent when Devin finishes)
+
+    Returns True if the DM was sent successfully.
+    """
+    slack_user_id = lookup_slack_user(email)
+    if not slack_user_id:
+        logger.warning("Could not find Slack user for %s", email)
+        return False
+
+    n = len(flag_keys)
+    flag_list = "\n".join(f"  - `{k}`" for k in flag_keys)
+
+    # Build Devin Review URL from the GitHub PR URL
+    review_url = pr_url.replace("github.com", "app.devin.ai/review")
+
+    text = (
+        f":white_check_mark: *CodeCull: cleanup PR ready for review*\n\n"
+        f"Devin has created a draft PR removing {n} stale flag{'s' if n != 1 else ''}:\n"
+        f"{flag_list}\n\n"
+        f"Review the changes and merge when ready."
+    )
+
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Review PR"},
+                    "action_id": "review_pr",
+                    "url": review_url,
+                    "style": "primary",
+                },
+            ],
+        },
+    ]
+
+    sent = send_dm(slack_user_id, text, blocks)
+    if sent:
+        logger.info("Sent PR-ready Slack DM to %s for %d flags", email, n)
+    return sent

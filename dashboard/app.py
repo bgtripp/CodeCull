@@ -20,7 +20,7 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import Body, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -28,21 +28,20 @@ from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from scanner.demo_reset import run_demo_reset
 from scanner.devin_integration import (
-    create_cleanup_session,
     create_rebase_session,
+    create_stacked_cleanup_session,
     extract_pr_url,
     get_session_status,
     poll_session_until_done,
-    stop_codecull_sessions,
 )
 from scanner.flag_scanner import FlagCandidate, run_scan
 from scanner.github_stats import (
-    discover_cleanup_prs,
     fetch_pr_stats,
     list_pull_requests,
     merge_main_into_branch,
 )
 from scanner.pr_sync import sync_state
+from scanner.slack_notify import send_pr_ready_notification
 from scanner.state_store import load_state, save_state
 
 # Use explicit path so .env is found regardless of CWD / uvicorn reloader.
@@ -60,6 +59,8 @@ _candidates: list[FlagCandidate] = []
 _sessions: dict[str, dict] = {}  # flag_key -> {session_id, url, status, pr_url}
 _pr_stats: dict[str, dict] = {}  # flag_key -> {files_changed, additions, deletions, ...}
 _last_scan_time: datetime | None = None
+# Stacked session tracking: session_id -> {flag_keys, notified}
+_stacked_sessions: dict[str, dict] = {}
 
 
 _STATE_PATH = Path(os.getenv("CODECULL_STATE_PATH", str(_PROJECT_ROOT / ".codecull_state.json")))
@@ -352,17 +353,6 @@ def index(request: Request):
     )
 
 
-@app.post("/skip/{flag_key}")
-async def skip_flag(request: Request, flag_key: str):
-    """Mark a flag as skipped."""
-    if not _get_session_email(request):
-        return RedirectResponse(url="/auth/login", status_code=303)
-    candidate = _find_candidate(flag_key)
-    if candidate is not None:
-        candidate.status = "skipped"
-    return RedirectResponse(url="/", status_code=303)
-
-
 @app.get("/status/{flag_key}")
 async def flag_status(request: Request, flag_key: str):
     """Return JSON status for a flag (used by the dashboard for polling)."""
@@ -393,15 +383,17 @@ def _refresh_pr_statuses() -> None:
     Also removes error-state sessions (no PR created) so they don't persist
     forever on the dashboard.
 
-    For *queued* sessions (rate-limited during dispatch), automatically
-    attempts to dispatch them once a running session completes or capacity
-    frees up.
+    When a stacked session completes and produces a PR, all flags in that
+    session are updated with the PR URL, and a Phase 2 Slack notification
+    is sent to the maintainer.
     """
     global _candidates, _sessions, _pr_stats
 
     keys_to_remove: list[str] = []
     state_changed = False
-    running_count = sum(1 for s in _sessions.values() if s.get("status") == "running")
+
+    # Deduplicate session IDs to avoid polling the same stacked session N times
+    checked_sessions: dict[str, dict] = {}  # session_id -> devin_status
 
     for flag_key, session in list(_sessions.items()):
         pr_url = session.get("pr_url")
@@ -411,30 +403,55 @@ def _refresh_pr_statuses() -> None:
             status = session.get("status", "")
             sid = session.get("session_id")
 
-            # Skip queued sessions — handled in the auto-dispatch pass below
-            if status == "queued":
-                continue
-
             # If session is still running, poll Devin for completion
             if sid and status == "running":
-                try:
-                    devin_status = get_session_status(sid)
-                    state = devin_status.get("status_enum", "unknown")
+                # Avoid duplicate API calls for stacked sessions
+                if sid in checked_sessions:
+                    devin_status = checked_sessions[sid]
+                else:
+                    try:
+                        devin_status = get_session_status(sid)
+                        checked_sessions[sid] = devin_status
+                    except Exception:
+                        logger.exception("Failed to check Devin status for %s", flag_key)
+                        continue
 
-                    if state in ("finished", "stopped", "blocked"):
-                        running_count -= 1
-                        found_pr = extract_pr_url(devin_status)
-                        if found_pr:
-                            session["pr_url"] = found_pr
-                            session["status"] = "ready"
-                            state_changed = True
-                            logger.info("%s: Devin finished, PR found: %s", flag_key, found_pr)
-                        else:
-                            session["status"] = "error"
-                            state_changed = True
-                            logger.info("%s: Devin finished but no PR (state=%s)", flag_key, state)
-                except Exception:
-                    logger.exception("Failed to check Devin status for %s", flag_key)
+                state_val = devin_status.get("status_enum", "unknown")
+
+                if state_val in ("finished", "stopped", "blocked"):
+                    found_pr = extract_pr_url(devin_status)
+                    if found_pr:
+                        session["pr_url"] = found_pr
+                        session["status"] = "ready"
+                        state_changed = True
+                        logger.info("%s: Devin finished, PR found: %s", flag_key, found_pr)
+
+                        # For stacked sessions, update ALL flags sharing this session_id
+                        stacked = _stacked_sessions.get(sid)
+                        if stacked:
+                            for other_key in stacked.get("flag_keys", []):
+                                other_session = _sessions.get(other_key)
+                                if other_session and not other_session.get("pr_url"):
+                                    other_session["pr_url"] = found_pr
+                                    other_session["status"] = "ready"
+                                    logger.info("%s: updated with stacked PR: %s", other_key, found_pr)
+
+                            # Send Phase 2 Slack notification (once per stacked session)
+                            if not stacked.get("notified"):
+                                _send_phase2_notification(stacked, found_pr)
+                                stacked["notified"] = True
+                    else:
+                        session["status"] = "error"
+                        state_changed = True
+                        logger.info("%s: Devin finished but no PR (state=%s)", flag_key, state_val)
+
+                        # Mark all flags in stacked session as error
+                        stacked = _stacked_sessions.get(sid)
+                        if stacked:
+                            for other_key in stacked.get("flag_keys", []):
+                                other_session = _sessions.get(other_key)
+                                if other_session and other_session.get("status") == "running":
+                                    other_session["status"] = "error"
                 continue
 
             # Remove sessions stuck in error/terminal state with no PR
@@ -464,37 +481,6 @@ def _refresh_pr_statuses() -> None:
         _candidates = [c for c in _candidates if c.flag_key not in keys_to_remove]
         state_changed = True
 
-    # Auto-dispatch queued sessions now that capacity may have freed up
-    queued = [(k, s) for k, s in _sessions.items() if s.get("status") == "queued"]
-    if queued:
-        repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
-        for flag_key, session in queued:
-            candidate = _find_candidate(flag_key)
-            if not candidate:
-                continue
-            try:
-                result = create_cleanup_session(
-                    flag_key=candidate.flag_key,
-                    repo=repo_slug,
-                    variation=candidate.variation_served,
-                    files=candidate.files_affected,
-                )
-                _sessions[flag_key] = {
-                    "session_id": result["session_id"],
-                    "url": result["url"],
-                    "status": "running",
-                    "pr_url": None,
-                }
-                state_changed = True
-                logger.info("%s: auto-dispatched queued session: %s", flag_key, result["url"])
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429:
-                    logger.info("%s: still rate-limited, staying queued", flag_key)
-                else:
-                    logger.exception("Failed to auto-dispatch %s", flag_key)
-            except Exception:
-                logger.exception("Failed to auto-dispatch %s", flag_key)
-
     if state_changed:
         # Re-apply statuses and persist
         _apply_state_to_candidates(_candidates)
@@ -502,11 +488,132 @@ def _refresh_pr_statuses() -> None:
         logger.info("State refreshed: removed %d, updated others", len(keys_to_remove))
 
 
+def _send_phase2_notification(stacked: dict, pr_url: str) -> None:
+    """Send Phase 2 Slack DM when a stacked cleanup PR is ready."""
+    flag_keys = stacked.get("flag_keys", [])
+    maintainer_email = stacked.get("maintainer_email", "")
+    dashboard_url = os.getenv("DASHBOARD_URL", "http://localhost:8000")
+
+    if not maintainer_email:
+        # Try to find from candidate metadata
+        for fk in flag_keys:
+            c = _find_candidate(fk)
+            if c and c.maintainer_email:
+                maintainer_email = c.maintainer_email
+                break
+
+    if not maintainer_email:
+        maintainer_email = os.getenv("SLACK_NOTIFY_EMAIL", "")
+
+    if not maintainer_email:
+        logger.warning("No maintainer email for Phase 2 notification")
+        return
+
+    try:
+        send_pr_ready_notification(
+            email=maintainer_email,
+            flag_keys=flag_keys,
+            pr_url=pr_url,
+            dashboard_url=dashboard_url,
+        )
+    except Exception:
+        logger.exception("Failed to send Phase 2 Slack notification")
+
+
 def _find_candidate(flag_key: str) -> FlagCandidate | None:
     for c in _candidates:
         if c.flag_key == flag_key:
             return c
     return None
+
+
+# ---------------------------------------------------------------------------
+# Fix Selected Flags (Stacked PR)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/fix-selected")
+def api_fix_selected(request: Request, flag_keys: list[str] = Body(..., embed=True)):
+    """Dispatch a single Devin session to remove all selected flags in one PR.
+
+    Expects JSON body: ``{"flag_keys": ["flag-a", "flag-b", ...]}``
+
+    All selected flags are assigned the same Devin session ID.  When the
+    session completes, ``_refresh_pr_statuses()`` will update ALL flags
+    with the resulting PR URL and send a Phase 2 Slack DM.
+    """
+    _check_auth(request)
+    if not flag_keys:
+        raise HTTPException(status_code=400, detail="No flag_keys provided")
+
+    # Build the flags list for the stacked prompt
+    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+    flags_for_prompt: list[dict] = []
+    maintainer_email = ""
+
+    for fk in flag_keys:
+        candidate = _find_candidate(fk)
+        if not candidate:
+            raise HTTPException(status_code=404, detail=f"Flag {fk} not found")
+        if candidate.status not in ("pending",):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Flag {fk} is already {candidate.status}",
+            )
+        flags_for_prompt.append({
+            "flag_key": candidate.flag_key,
+            "variation": candidate.variation_served,
+            "files": candidate.files_affected,
+        })
+        if not maintainer_email and candidate.maintainer_email:
+            maintainer_email = candidate.maintainer_email
+
+    # Dispatch the stacked Devin session
+    try:
+        result = create_stacked_cleanup_session(
+            flags=flags_for_prompt,
+            repo=repo_slug,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="Devin API rate limit — try again in a few minutes",
+            )
+        raise HTTPException(status_code=502, detail=f"Devin API error: {exc.response.status_code}")
+
+    session_id = result["session_id"]
+    session_url = result["url"]
+
+    # Register the stacked session
+    _stacked_sessions[session_id] = {
+        "flag_keys": flag_keys,
+        "maintainer_email": maintainer_email,
+        "notified": False,
+    }
+
+    # Point all selected flags to this session
+    for fk in flag_keys:
+        _sessions[fk] = {
+            "session_id": session_id,
+            "url": session_url,
+            "status": "running",
+            "pr_url": None,
+        }
+
+    _apply_state_to_candidates(_candidates)
+    save_state(_STATE_PATH, _sessions, _pr_stats)
+
+    logger.info(
+        "Dispatched stacked Devin session %s for %d flags: %s",
+        session_id, len(flag_keys), ", ".join(flag_keys),
+    )
+
+    return {
+        "status": "dispatched",
+        "session_id": session_id,
+        "session_url": session_url,
+        "flag_keys": flag_keys,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +630,7 @@ def _run_sync_background() -> None:
     """Execute sync_state in a background thread and reload dashboard state."""
     global _candidates, _sessions, _pr_stats, _last_scan_time
     try:
-        result = sync_state(state_path=_STATE_PATH)
+        sync_state(state_path=_STATE_PATH)
         # Reload dashboard in-memory state from the updated file
         _candidates = run_scan()
         _last_scan_time = datetime.now(timezone.utc)
@@ -750,12 +857,12 @@ _reset_lock = threading.Lock()
 def api_reset_demo(request: Request):
     """Reset the demo to its initial state (synchronous, fast).
 
-    Phase 1: Restores LogiOps source files, re-creates stale flags in
-    Unleash, closes open cleanup PRs, and clears the dashboard state.
-    Completes in ~6 s.
+    Restores LogiOps source files, re-creates stale flags in Unleash,
+    closes open cleanup PRs, clears dashboard state, re-scans, and
+    sends a Phase 1 Slack notification.
 
-    The client should follow up with ``POST /api/reset-demo/dispatch``
-    to stop old sessions and dispatch new Devin cleanup sessions.
+    Devin is NOT dispatched here — the user selects flags on the
+    dashboard and clicks "Fix in Stacked PR" to trigger Devin.
     """
     _check_auth(request)
 
@@ -765,19 +872,32 @@ def api_reset_demo(request: Request):
             status_code=409,
         )
 
-    global _candidates, _sessions, _pr_stats, _last_scan_time
+    global _candidates, _sessions, _pr_stats, _last_scan_time, _stacked_sessions
     try:
         results = run_demo_reset()
 
         # Clear all dashboard state
         _sessions.clear()
         _pr_stats.clear()
+        _stacked_sessions.clear()
         _candidates = []
         save_state(_STATE_PATH, _sessions, _pr_stats)
 
         # Re-scan to pick up restored flags
         _candidates = run_scan()
         _last_scan_time = datetime.now(timezone.utc)
+        _apply_state_to_candidates(_candidates)
+
+        # Send Phase 1 Slack notification (non-blocking)
+        try:
+            sync_state(state_path=_STATE_PATH)
+        except Exception:
+            logger.exception("Phase 1 Slack notification failed (non-critical)")
+
+        # Reload state after sync (sync may have found existing PRs)
+        state = load_state(_STATE_PATH)
+        _sessions.update(state.get("sessions", {}))
+        _pr_stats.update(state.get("pr_stats", {}))
         _apply_state_to_candidates(_candidates)
 
         logger.info("Demo reset completed successfully — %d candidates", len(_candidates))
@@ -790,101 +910,3 @@ def api_reset_demo(request: Request):
         )
     finally:
         _reset_lock.release()
-
-
-@app.post("/api/reset-demo/dispatch")
-def api_reset_demo_dispatch(request: Request):
-    """Dispatch Devin cleanup sessions after a reset (Phase 2).
-
-    Stops old CodeCull sessions to free up org slots, then dispatches
-    a new Devin session for each stale-flag candidate.  Each dispatch
-    is fast (~2-3 s) but stopping old sessions can take 10-20 s, so
-    the total may be up to ~30 s.  Results are persisted to the state
-    file so the dashboard survives Fly.io machine restarts.
-    """
-    _check_auth(request)
-
-    global _candidates, _sessions, _pr_stats
-
-    if not _candidates:
-        return {"status": "no_candidates", "message": "Run /api/reset-demo first."}
-
-    # Stop old CodeCull sessions to free up org session slots
-    stopped = 0
-    try:
-        stopped = stop_codecull_sessions()
-        logger.info("Stopped %d old CodeCull sessions before dispatching", stopped)
-    except Exception:
-        logger.exception("Failed to stop old sessions (continuing anyway)")
-
-    repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
-    dispatch_results: list[dict] = []
-
-    # Check for existing cleanup PRs first (avoid duplicate Devin sessions)
-    flag_keys = [c.flag_key for c in _candidates]
-    existing_prs: dict[str, dict] = {}
-    try:
-        existing_prs = discover_cleanup_prs(repo_slug, flag_keys)
-    except Exception:
-        logger.exception("Failed to discover existing cleanup PRs")
-
-    dispatched_count = 0
-    for c in _candidates:
-        existing = existing_prs.get(c.flag_key, {})
-        if existing.get("pr_url"):
-            _sessions[c.flag_key] = {
-                "status": "ready",
-                "pr_url": existing["pr_url"],
-            }
-            dispatch_results.append({"flag": c.flag_key, "action": "existing_pr"})
-            logger.info("%s: existing PR found, skipping dispatch", c.flag_key)
-            continue
-
-        # Small delay between dispatches to avoid hammering the API
-        if dispatched_count > 0:
-            time.sleep(2)
-
-        try:
-            result = create_cleanup_session(
-                flag_key=c.flag_key,
-                repo=repo_slug,
-                variation=c.variation_served,
-                files=c.files_affected,
-            )
-            _sessions[c.flag_key] = {
-                "session_id": result["session_id"],
-                "url": result["url"],
-                "status": "running",
-                "pr_url": None,
-            }
-            dispatch_results.append({
-                "flag": c.flag_key,
-                "action": "dispatched",
-                "session_url": result["url"],
-            })
-            dispatched_count += 1
-            logger.info("%s: Devin session dispatched: %s", c.flag_key, result["url"])
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429:
-                # Rate limited — queue for auto-dispatch on next refresh
-                _sessions[c.flag_key] = {"status": "queued"}
-                dispatch_results.append({"flag": c.flag_key, "action": "queued"})
-                logger.warning("%s: 429 rate-limited, queued for later dispatch", c.flag_key)
-            else:
-                logger.exception("Failed to dispatch Devin for %s", c.flag_key)
-                dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})
-        except Exception as exc:
-            logger.exception("Failed to dispatch Devin for %s", c.flag_key)
-            dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})
-
-    # Apply session state to candidates so the page shows correct statuses
-    _apply_state_to_candidates(_candidates)
-
-    # Persist sessions so state survives machine restarts
-    save_state(_STATE_PATH, _sessions, _pr_stats)
-
-    return {
-        "status": "done",
-        "sessions_stopped": stopped,
-        "dispatch": dispatch_results,
-    }
