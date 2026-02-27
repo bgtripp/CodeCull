@@ -400,6 +400,12 @@ def reset_unleash_flags(unleash_url: str) -> list[dict]:
                 continue
         except Exception:
             logger.exception("Error checking flag %s", name)
+            results.append({
+                "flag": name,
+                "status": "error",
+                "detail": "Failed to check flag existence in Unleash",
+            })
+            continue
 
         # Flag doesn't exist — the flag service seeds on startup but only
         # if the DB is empty.  We need to insert it directly.
