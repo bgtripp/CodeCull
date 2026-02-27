@@ -640,6 +640,12 @@ def _refresh_pr_statuses() -> None:
                 all_flags_have_url = False
         unique_pr_urls = list(dict.fromkeys(pr_urls_for_stack))
         if not unique_pr_urls:
+            # If none of the flags exist in _sessions anymore (all merged/removed),
+            # mark as notified so the background poller stops retrying forever.
+            if not any(fk in _sessions for fk in stacked_keys):
+                stacked["notified"] = True
+                state_changed = True
+                logger.info("Orphaned stacked session %s — all flags removed, marking notified", sid)
             continue
         # Notify when all flags covered with distinct PRs, OR when all
         # flags have *some* URL and the Devin session is no longer running
