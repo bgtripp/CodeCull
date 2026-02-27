@@ -367,14 +367,24 @@ async def flag_status(request: Request, flag_key: str):
 # ---------------------------------------------------------------------------
 
 def _refresh_pr_statuses() -> None:
-    """Check GitHub for merged/closed PRs and drop them from the queue."""
+    """Check GitHub for merged/closed PRs and drop them from the queue.
+
+    Also removes error-state sessions (no PR created) so they don't persist
+    forever on the dashboard.
+    """
     global _candidates, _sessions, _pr_stats
 
     keys_to_remove: list[str] = []
 
     for flag_key, session in list(_sessions.items()):
         pr_url = session.get("pr_url")
+
+        # Remove sessions stuck in error/terminal state with no PR
         if not pr_url:
+            status = session.get("status", "")
+            if status in ("error", "finished", "stopped", "blocked"):
+                logger.info("Removing %s — session ended without a PR (status=%s)", flag_key, status)
+                keys_to_remove.append(flag_key)
             continue
 
         stats = fetch_pr_stats(pr_url)
@@ -398,7 +408,7 @@ def _refresh_pr_statuses() -> None:
 
         # Persist the updated state so restarts also reflect the removal
         save_state(_STATE_PATH, _sessions, _pr_stats)
-        logger.info("Removed %d merged/closed PR(s) from queue", len(keys_to_remove))
+        logger.info("Removed %d merged/closed/errored item(s) from queue", len(keys_to_remove))
 
 
 def _find_candidate(flag_key: str) -> FlagCandidate | None:
