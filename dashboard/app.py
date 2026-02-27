@@ -495,8 +495,11 @@ def _refresh_pr_statuses() -> None:
                                         if pr_st is not None:
                                             _pr_stats[fk] = pr_st
 
-                            # Send Phase 2 Slack notification once all expected PRs are ready
-                            if not stacked.get("notified") and len(all_pr_urls) >= len(stacked_keys):
+                            # Send Phase 2 Slack notification when:
+                            # - All expected PRs are ready, OR
+                            # - Session is terminal (Devin won't create more PRs)
+                            all_covered = len(all_pr_urls) >= len(stacked_keys)
+                            if not stacked.get("notified") and (all_covered or is_terminal):
                                 sent = _send_phase2_notification(stacked, all_pr_urls)
                                 if sent:
                                     stacked["notified"] = True
@@ -558,25 +561,52 @@ def _refresh_pr_statuses() -> None:
 
     # Catch-up: send Slack notifications for stacked sessions where all flags
     # already have pr_url set but notification was never sent (e.g. PRs were
-    # matched on a previous deployment that didn't have this notification fix).
+    # matched on a previous deployment that didn't have this notification fix,
+    # or Devin created fewer PRs than flags so the count guard blocked it).
     for sid, stacked in _stacked_sessions.items():
         if stacked.get("notified"):
             continue
         stacked_keys = stacked.get("flag_keys", [])
         pr_urls_for_stack: list[str] = []
+        all_flags_have_url = True
         for fk in stacked_keys:
             fk_session = _sessions.get(fk)
             if fk_session and fk_session.get("pr_url"):
                 pr_urls_for_stack.append(fk_session["pr_url"])
-        # Deduplicate — fallback URLs may have been assigned for unmatched
-        # flags; only notify when we have enough *distinct* PRs.
+            else:
+                all_flags_have_url = False
         unique_pr_urls = list(dict.fromkeys(pr_urls_for_stack))
-        if len(unique_pr_urls) >= len(stacked_keys) and unique_pr_urls:
+        if not unique_pr_urls:
+            continue
+        # Notify when all flags covered with distinct PRs, OR when all
+        # flags have *some* URL and the Devin session is no longer running
+        # (i.e. no more PRs are expected).
+        all_covered = len(unique_pr_urls) >= len(stacked_keys)
+        if all_covered:
             logger.info("Catch-up: sending Phase 2 Slack for stacked session %s", sid)
             sent = _send_phase2_notification(stacked, unique_pr_urls)
             if sent:
                 stacked["notified"] = True
                 state_changed = True
+        elif all_flags_have_url:
+            # All flags have a URL (possibly fallback duplicates).
+            # Check if the Devin session is done — if so, send with what we have.
+            try:
+                devin_status = get_session_status(sid)
+                sv = devin_status.get("status_enum") or devin_status.get("status", "")
+                session_done = sv in ("finished", "stopped", "blocked", "suspended")
+            except Exception:
+                # Can't reach Devin — assume session is done (old session)
+                session_done = True
+            if session_done:
+                logger.info(
+                    "Catch-up (partial): sending Phase 2 Slack for stacked session %s "
+                    "(%d unique PRs for %d flags)", sid, len(unique_pr_urls), len(stacked_keys),
+                )
+                sent = _send_phase2_notification(stacked, unique_pr_urls)
+                if sent:
+                    stacked["notified"] = True
+                    state_changed = True
 
     if state_changed:
         # Re-apply statuses and persist
