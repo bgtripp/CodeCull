@@ -16,12 +16,28 @@
         {% endif %}
     </div>
     <div class="toolbar-right">
+        {% if maintainer_emails|length > 0 %}
+        <div class="filter-group">
+            <label for="maintainer-filter" class="filter-label">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            </label>
+            <select id="maintainer-filter" class="filter-select" data-user-email="{{ user_email }}">
+                <option value="__mine__">My flags</option>
+                <option value="__all__">All maintainers</option>
+                {% for m in maintainer_emails %}
+                {% if m != user_email %}
+                <option value="{{ m }}">{{ m.split('@')[0] | replace('.', ' ') | title }}</option>
+                {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
         {% if ready %}
-        <span class="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready</span>
+        <span class="candidate-count" id="candidate-count">{{ ready|length }} PR{{ 's' if ready|length != 1 }} ready</span>
         {% elif in_progress %}
-        <span class="candidate-count">Devin working&hellip;</span>
+        <span class="candidate-count" id="candidate-count">Devin working&hellip;</span>
         {% elif pending %}
-        <span class="candidate-count">{{ pending|length }} flag{{ 's' if pending|length != 1 }} to review</span>
+        <span class="candidate-count" id="candidate-count">{{ pending|length }} flag{{ 's' if pending|length != 1 }} to review</span>
         {% endif %}
         <button id="reset-demo-btn" class="btn btn-reset" title="Reset LogiOps to pre-cleanup state for re-demoing">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
@@ -36,6 +52,11 @@
 </div>
 {% endif %}
 
+<!-- Shown by JS when the filter hides all cards but flags do exist -->
+<div id="filter-empty-state" class="empty-state" style="display:none;">
+    <p>No flags match this filter. <a href="#" id="show-all-link">View all maintainers</a></p>
+</div>
+
 {% if pending %}
 <div class="select-bar">
     <label class="select-all-label">
@@ -47,7 +68,7 @@
 
 <div class="card-list">
 {% for c in visible %}
-    <div class="card card--{{ c.status }}" data-flag="{{ c.flag_key }}">
+    <div class="card card--{{ c.status }}" data-flag="{{ c.flag_key }}" data-maintainer="{{ c.maintainer_email|lower }}">
         <div class="card-header">
             <div class="flag-info">
                 {% if c.status == 'pending' %}
@@ -162,6 +183,93 @@ function showToast(msg, type) {
 }
 
 // ---------------------------------------------------------------------------
+// Maintainer email filter
+// ---------------------------------------------------------------------------
+(function() {
+    const filterSelect = document.getElementById('maintainer-filter');
+    if (!filterSelect) return;
+
+    const userEmail = (filterSelect.dataset.userEmail || '').toLowerCase();
+    const cards = document.querySelectorAll('.card[data-maintainer]');
+    const emptyState = document.querySelector('.empty-state');
+    const selectBar = document.querySelector('.select-bar');
+
+    function applyFilter() {
+        const val = filterSelect.value;
+        let visibleCount = 0;
+
+        cards.forEach(function(card) {
+            const maintainer = card.dataset.maintainer || '';
+            let show = false;
+
+            if (val === '__all__') {
+                show = true;
+            } else if (val === '__mine__') {
+                show = maintainer === userEmail;
+            } else {
+                show = maintainer === val.toLowerCase();
+            }
+
+            card.style.display = show ? '' : 'none';
+            if (show) visibleCount++;
+
+            // Uncheck hidden checkboxes so they aren't accidentally submitted
+            if (!show) {
+                var cb = card.querySelector('.flag-checkbox');
+                if (cb) cb.checked = false;
+            }
+        });
+
+        // Sync checkbox action bar after filter change
+        var actionBar = document.getElementById('action-bar');
+        if (actionBar) {
+            var anyChecked = document.querySelectorAll('.flag-checkbox:checked').length;
+            if (!anyChecked) actionBar.style.display = 'none';
+        }
+
+        // Show/hide empty states
+        var filterEmpty = document.getElementById('filter-empty-state');
+        if (emptyState) {
+            // Server-rendered empty state: only show when there are truly zero flags
+            emptyState.style.display = (cards.length === 0) ? '' : 'none';
+        }
+        if (filterEmpty) {
+            // Filter empty state: show when filter hides everything but flags exist
+            filterEmpty.style.display = (visibleCount === 0 && cards.length > 0) ? '' : 'none';
+        }
+
+        // Update the visible count text
+        var countEl = document.getElementById('candidate-count');
+        if (countEl && val !== '__all__') {
+            countEl.textContent = visibleCount + ' flag' + (visibleCount !== 1 ? 's' : '');
+        }
+
+        // Hide select bar when no pending cards are visible
+        if (selectBar) {
+            const visiblePending = document.querySelectorAll('.card--pending');
+            let anyVisible = false;
+            visiblePending.forEach(function(c) { if (c.style.display !== 'none') anyVisible = true; });
+            selectBar.style.display = anyVisible ? '' : 'none';
+        }
+    }
+
+    filterSelect.addEventListener('change', applyFilter);
+
+    // "View all maintainers" link in filter-empty state
+    var showAllLink = document.getElementById('show-all-link');
+    if (showAllLink) {
+        showAllLink.addEventListener('click', function(e) {
+            e.preventDefault();
+            filterSelect.value = '__all__';
+            applyFilter();
+        });
+    }
+
+    // Apply initial filter (My flags) on page load
+    applyFilter();
+})();
+
+// ---------------------------------------------------------------------------
 // Checkbox selection + floating action bar
 // ---------------------------------------------------------------------------
 (function() {
@@ -182,10 +290,15 @@ function showToast(msg, type) {
         } else {
             actionBar.style.display = 'none';
         }
-        // Update select-all state
+        // Update select-all state (only count visible checkboxes)
         if (selectAllCb) {
-            selectAllCb.checked = n === checkboxes.length && n > 0;
-            selectAllCb.indeterminate = n > 0 && n < checkboxes.length;
+            var visibleCbs = Array.from(checkboxes).filter(function(cb) {
+                var card = cb.closest('.card');
+                return card && card.style.display !== 'none';
+            });
+            var visibleChecked = visibleCbs.filter(function(cb) { return cb.checked; }).length;
+            selectAllCb.checked = visibleChecked === visibleCbs.length && visibleCbs.length > 0;
+            selectAllCb.indeterminate = visibleChecked > 0 && visibleChecked < visibleCbs.length;
         }
     }
 
@@ -196,7 +309,10 @@ function showToast(msg, type) {
     if (selectAllCb) {
         selectAllCb.addEventListener('change', function() {
             checkboxes.forEach(function(cb) {
-                cb.checked = selectAllCb.checked;
+                var card = cb.closest('.card');
+                if (card && card.style.display !== 'none') {
+                    cb.checked = selectAllCb.checked;
+                }
             });
             updateBar();
         });
@@ -205,8 +321,12 @@ function showToast(msg, type) {
     // Fix in Stacked PR button
     if (fixBtn) {
         fixBtn.addEventListener('click', async function() {
-            const checked = document.querySelectorAll('.flag-checkbox:checked');
-            const flagKeys = Array.from(checked).map(function(cb) { return cb.value; });
+            // Only submit visible checked flags (respect maintainer filter)
+            const checked = Array.from(document.querySelectorAll('.flag-checkbox:checked')).filter(function(cb) {
+                var card = cb.closest('.card');
+                return card && card.style.display !== 'none';
+            });
+            const flagKeys = checked.map(function(cb) { return cb.value; });
 
             if (flagKeys.length === 0) return;
 
