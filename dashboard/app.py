@@ -629,7 +629,7 @@ _SYNC_API_TOKEN = os.getenv("SYNC_API_TOKEN", "")
 
 def _run_sync_background() -> None:
     """Execute sync_state in a background thread and reload dashboard state."""
-    global _candidates, _sessions, _pr_stats, _last_scan_time
+    global _candidates, _sessions, _pr_stats, _last_scan_time, _stacked_sessions
     try:
         sync_state(state_path=_STATE_PATH)
         # Reload dashboard in-memory state from the updated file
@@ -638,6 +638,7 @@ def _run_sync_background() -> None:
         state = load_state(_STATE_PATH)
         _sessions = state.get("sessions", {}) or {}
         _pr_stats = state.get("pr_stats", {}) or {}
+        _stacked_sessions = state.get("stacked_sessions", {}) or {}
         _apply_state_to_candidates(_candidates)
         _candidates.sort(
             key=lambda c: (

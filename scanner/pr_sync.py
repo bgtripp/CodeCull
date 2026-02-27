@@ -43,12 +43,16 @@ def sync_state(state_path: Path | None = None) -> dict:
             os.getenv("CODECULL_STATE_PATH", str(project_root / ".codecull_state.json"))
         )
 
+    # Load existing stacked_sessions so we never lose them
+    _existing = load_state(state_path)
+    stacked_sessions: dict = _existing.get("stacked_sessions", {}) or {}
+
     # 1. Scan for stale flags
     logger.info("Step 1/4: Scanning for stale flags...")
     candidates = run_scan()
     if not candidates:
         logger.info("No stale flags found — nothing to do.")
-        save_state(state_path, sessions={}, pr_stats={})
+        save_state(state_path, sessions={}, pr_stats={}, stacked_sessions=stacked_sessions)
         return {"sessions": {}, "pr_stats": {}}
 
     logger.info("Found %d stale flag candidate(s)", len(candidates))
@@ -100,8 +104,8 @@ def sync_state(state_path: Path | None = None) -> dict:
         except Exception:
             logger.exception("Failed to fetch PR stats for %s", flag_key)
 
-    # 5. Persist state
-    save_state(state_path, sessions=sessions, pr_stats=pr_stats)
+    # 5. Persist state (preserve stacked_sessions)
+    save_state(state_path, sessions=sessions, pr_stats=pr_stats, stacked_sessions=stacked_sessions)
     ready_count = sum(1 for s in sessions.values() if s.get("pr_url"))
     logger.info("Wrote state file %s (%d PRs ready)", state_path, ready_count)
 
