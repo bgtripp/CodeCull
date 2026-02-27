@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 
 import httpx
@@ -84,6 +85,31 @@ Instructions:
 """
 
 
+_MAX_RETRIES = 5
+_RETRY_BASE_DELAY = 10  # seconds; doubles on each retry
+
+
+def _post_with_retry(url: str, headers: dict, json: dict, *, timeout: int = 30) -> httpx.Response:
+    """POST with exponential back-off on 429 Too Many Requests."""
+    delay = _RETRY_BASE_DELAY
+    for attempt in range(1, _MAX_RETRIES + 1):
+        resp = httpx.post(url, headers=headers, json=json, timeout=timeout)
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return resp
+        retry_after = int(resp.headers.get("Retry-After", str(delay)))
+        logger.warning(
+            "429 rate-limited (attempt %d/%d) — retrying in %ds",
+            attempt, _MAX_RETRIES, retry_after,
+        )
+        time.sleep(retry_after)
+        delay = min(delay * 2, 120)
+    # Final attempt — let the error propagate
+    resp = httpx.post(url, headers=headers, json=json, timeout=timeout)
+    resp.raise_for_status()
+    return resp
+
+
 def create_cleanup_session(
     flag_key: str,
     repo: str,
@@ -93,6 +119,7 @@ def create_cleanup_session(
     """Create a Devin session that removes the given flag.
 
     Returns a dict with 'session_id' and 'url'.
+    Retries automatically on 429 (rate limit) with exponential back-off.
     """
     prompt = _build_prompt(flag_key, repo, variation, files)
 
@@ -102,13 +129,11 @@ def create_cleanup_session(
         "tags": ["CodeCull", f"flag:{flag_key}"],
     }
 
-    resp = httpx.post(
+    resp = _post_with_retry(
         f"{_api_base()}/sessions",
         headers=_headers(),
         json=payload,
-        timeout=30,
     )
-    resp.raise_for_status()
     data = resp.json()
 
     session_id = data.get("session_id", "")
@@ -178,13 +203,11 @@ Instructions:
         "tags": ["CodeCull", "rebase", f"pr:{pr_number}"],
     }
 
-    resp = httpx.post(
+    resp = _post_with_retry(
         f"{_api_base()}/sessions",
         headers=_headers(),
         json=payload,
-        timeout=30,
     )
-    resp.raise_for_status()
     data = resp.json()
 
     session_id = data.get("session_id", "")
@@ -204,7 +227,6 @@ def extract_pr_url(session_status: dict) -> str | None:
 
     # Fallback: scan the last message / result text for a GitHub PR URL
     result_text = session_status.get("result", "") or ""
-    import re
     pr_match = re.search(r"https://github\.com/[^\s]+/pull/\d+", result_text)
     if pr_match:
         return pr_match.group(0)

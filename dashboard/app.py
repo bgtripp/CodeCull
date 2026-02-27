@@ -752,6 +752,7 @@ def api_reset_demo(request: Request):
         except Exception:
             logger.exception("Failed to discover existing cleanup PRs")
 
+        dispatched_count = 0
         for c in _candidates:
             existing = existing_prs.get(c.flag_key, {})
             if existing.get("pr_url"):
@@ -762,6 +763,10 @@ def api_reset_demo(request: Request):
                 dispatch_results.append({"flag": c.flag_key, "action": "existing_pr"})
                 logger.info("%s: existing PR found, skipping dispatch", c.flag_key)
                 continue
+
+            # Small delay between dispatches to avoid hammering the API
+            if dispatched_count > 0:
+                time.sleep(2)
 
             try:
                 result = create_cleanup_session(
@@ -781,10 +786,11 @@ def api_reset_demo(request: Request):
                     "action": "dispatched",
                     "session_url": result["url"],
                 })
+                dispatched_count += 1
                 logger.info("%s: Devin session dispatched: %s", c.flag_key, result["url"])
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to dispatch Devin for %s", c.flag_key)
-                dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed"})
+                dispatch_results.append({"flag": c.flag_key, "action": "dispatch_failed", "error": str(exc)})
 
         # Apply session state to candidates so the page shows correct statuses
         _apply_state_to_candidates(_candidates)
