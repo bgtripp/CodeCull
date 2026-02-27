@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
+from scanner.demo_reset import run_demo_reset
 from scanner.devin_integration import create_rebase_session, poll_session_until_done
 from scanner.flag_scanner import FlagCandidate, run_scan
 from scanner.github_stats import (
@@ -651,3 +652,75 @@ def api_rebase_status(request: Request):
     """Check the status of the last/current rebase job."""
     _check_auth(request)
     return _rebase_status
+
+
+# ---------------------------------------------------------------------------
+# Demo Reset API
+# ---------------------------------------------------------------------------
+
+_reset_lock = threading.Lock()
+_reset_status: dict = {"running": False, "last_run": None, "results": None, "error": None}
+
+
+@app.post("/api/reset-demo")
+def api_reset_demo(request: Request):
+    """Reset the demo to its initial state.
+
+    Restores LogiOps source files, re-creates stale flags in Unleash,
+    closes open cleanup PRs, and clears the dashboard state.
+
+    Runs in a background thread; poll ``GET /api/reset-demo/status``.
+    """
+    _check_auth(request)
+
+    if _reset_status["running"]:
+        return {"status": "already_running", "message": "A reset is already in progress."}
+
+    if not _reset_lock.acquire(blocking=False):
+        return {"status": "already_running", "message": "A reset is already in progress."}
+
+    _reset_status["running"] = True
+    _reset_status["error"] = None
+    _reset_status["results"] = None
+
+    def _reset_worker() -> None:
+        global _candidates, _sessions, _pr_stats, _last_scan_time
+        try:
+            results = run_demo_reset()
+
+            # Clear all dashboard state
+            _sessions.clear()
+            _pr_stats.clear()
+            _candidates = []
+            save_state(_STATE_PATH, _sessions, _pr_stats)
+
+            # Re-scan to pick up restored flags
+            _candidates = run_scan()
+            _last_scan_time = datetime.now(timezone.utc)
+            _apply_state_to_candidates(_candidates)
+
+            _reset_status["results"] = results
+            _reset_status["error"] = None
+            logger.info("Demo reset completed successfully")
+        except Exception as exc:
+            logger.exception("Demo reset failed")
+            _reset_status["error"] = str(exc)
+        finally:
+            _reset_status["running"] = False
+            _reset_status["last_run"] = datetime.now(timezone.utc).isoformat()
+
+    def _locked_reset_worker() -> None:
+        try:
+            _reset_worker()
+        finally:
+            _reset_lock.release()
+
+    threading.Thread(target=_locked_reset_worker, daemon=True).start()
+    return {"status": "started", "message": "Demo reset started in background."}
+
+
+@app.get("/api/reset-demo/status")
+def api_reset_demo_status(request: Request):
+    """Check the status of the last/current demo reset."""
+    _check_auth(request)
+    return _reset_status
