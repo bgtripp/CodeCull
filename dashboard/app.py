@@ -442,13 +442,18 @@ def _match_prs_to_flags(
     ``"Remove stale flag: <flag_key>"``.  We fetch each PR's metadata and
     look for the flag key in the title.
 
+    When Devin-reported PR URLs don't cover all flags (e.g. the Devin API
+    hasn't indexed every PR yet), falls back to searching the target repo's
+    open PRs via the GitHub API so each flag gets its own correct link.
+
     Returns a dict mapping ``flag_key -> pr_url`` for matched flags.
     """
-    from scanner.github_stats import fetch_pr_stats
+    from scanner.github_stats import discover_cleanup_prs, fetch_pr_stats
 
     matched: dict[str, str] = {}
     remaining_keys = set(flag_keys)
 
+    # Pass 1: match using the PR URLs reported by the Devin session
     for url in pr_urls:
         if not remaining_keys:
             break
@@ -461,6 +466,20 @@ def _match_prs_to_flags(
                 matched[fk] = url
                 remaining_keys.discard(fk)
                 break
+
+    # Pass 2: for any unmatched flags, search the target repo's open PRs
+    if remaining_keys:
+        repo_slug = os.getenv("TARGET_REPO", "bgtripp/LogiOps")
+        logger.info(
+            "Searching GitHub for PRs matching %d unmatched flag(s): %s",
+            len(remaining_keys), ", ".join(remaining_keys),
+        )
+        discovered = discover_cleanup_prs(repo_slug, list(remaining_keys))
+        for fk, info in discovered.items():
+            if fk not in matched and info.get("pr_url"):
+                matched[fk] = info["pr_url"]
+                remaining_keys.discard(fk)
+                logger.info("%s: matched via GitHub search: %s", fk, info["pr_url"])
 
     return matched
 
