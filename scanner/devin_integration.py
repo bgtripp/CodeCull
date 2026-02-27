@@ -89,51 +89,66 @@ def _build_stacked_prompt(
     flags: list[dict],
     repo: str,
 ) -> str:
-    """Build a prompt for removing multiple flags in a single stacked PR.
+    """Build a prompt for removing flags as a true stacked PR chain.
 
     Each entry in *flags* has keys: flag_key, variation, files.
-    """
-    sections: list[str] = []
-    all_files: set[str] = set()
 
-    for flag in flags:
+    Devin will create one branch per flag, each branching off the previous,
+    and open one draft PR per flag targeting the previous branch (first
+    targets ``main``).  The result is a reviewable/mergeable stack.
+    """
+    steps: list[str] = []
+    prev_branch = "main"
+
+    for i, flag in enumerate(flags, 1):
         flag_key = flag["flag_key"]
         variation = flag["variation"]
         files = flag["files"]
-        all_files.update(files)
+        branch = f"codecull/remove-{flag_key}"
+        file_list = ", ".join(files)
 
         if variation == "always-on":
             action = (
-                f"  `{flag_key}` is always **ON**. Remove the flag check and keep "
+                f"`{flag_key}` is always **ON**. Remove the flag check and keep "
                 "only the 'enabled' / truthy code path. Delete the dead 'else' branch."
             )
         else:
             action = (
-                f"  `{flag_key}` is always **OFF**. Remove the flag check and keep "
+                f"`{flag_key}` is always **OFF**. Remove the flag check and keep "
                 "only the 'disabled' / falsy code path. Delete the dead 'if' branch."
             )
 
-        file_list = ", ".join(files)
-        sections.append(f"- {action}\n    Files: {file_list}")
+        pr_title = f"Remove stale flag: {flag_key}"
+        steps.append(
+            f"### Step {i}: {flag_key}\n"
+            f"1. Create branch `{branch}` from `{prev_branch}`.\n"
+            f"2. {action}\n"
+            f"   Files: {file_list}\n"
+            f"3. Remove every call to `is_enabled(\"{flag_key}\")` and the surrounding if/else. "
+            f"Keep the live code path inline.\n"
+            f"4. Remove any imports or config references that are now unused.\n"
+            f"5. Update or remove tests that reference `{flag_key}`.\n"
+            f"6. Commit all changes for this flag.\n"
+            f"7. Push `{branch}` and open a **draft** PR titled \"{pr_title}\" "
+            f"targeting `{prev_branch}`.\n"
+        )
+        prev_branch = branch
 
-    flag_list = "\n".join(sections)
-    flag_keys = [f["flag_key"] for f in flags]
-    pr_title = "Remove stale flags: " + ", ".join(flag_keys)
+    steps_text = "\n".join(steps)
 
     return f"""You are cleaning up {len(flags)} stale feature flags in the repo `{repo}`.
 
-Flags to remove:
-{flag_list}
+Create a **stacked PR chain** — one branch and one draft PR per flag.
+Each branch is based on the previous one so changes build on each other.
 
-Instructions:
-1. For EACH flag listed above, remove every call to `is_enabled("<flag_key>")` and the surrounding if/else.
-2. Keep the live code path inline (no conditional) for each flag.
-3. Remove any imports or config references that become unused after ALL flags are removed.
-4. Update or remove tests that reference any of these flags.
-5. Do NOT change any behaviour — the live code paths must stay identical.
-6. Make all changes in a SINGLE commit and open a **draft** pull request.
-7. PR title: "{pr_title}"
-8. In the PR description, list each flag removed and what code path was kept.
+{steps_text}
+
+**Important rules:**
+- Do NOT change any behaviour — the live code paths must stay identical.
+- Each PR removes exactly ONE flag. Do not combine flags in a single PR.
+- Each PR must target the PREVIOUS branch (except the first, which targets `main`).
+- In each PR description, state which flag was removed and what code path was kept.
+- Make sure each branch builds cleanly (no broken imports, no syntax errors).
 """
 
 
@@ -391,16 +406,35 @@ Instructions:
 
 def extract_pr_url(session_status: dict) -> str | None:
     """Try to extract a pull request URL from the session result."""
-    # The structured_output or result may contain a PR URL
+    urls = extract_all_pr_urls(session_status)
+    return urls[0] if urls else None
+
+
+def extract_all_pr_urls(session_status: dict) -> list[str]:
+    """Extract ALL pull request URLs from a Devin session result.
+
+    Returns a deduplicated list of GitHub PR URLs found in the session
+    structured outputs and result text.  Used for stacked PR sessions
+    that produce multiple PRs.
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+
+    # Check structured outputs first
     structured = session_status.get("structured_outputs") or []
     for output in structured:
         if "pull_request" in output:
-            return output["pull_request"].get("url")
+            url = output["pull_request"].get("url", "")
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
 
-    # Fallback: scan the last message / result text for a GitHub PR URL
+    # Scan the result text for all GitHub PR URLs
     result_text = session_status.get("result", "") or ""
-    pr_match = re.search(r"https://github\.com/[^\s]+/pull/\d+", result_text)
-    if pr_match:
-        return pr_match.group(0)
+    for match in re.finditer(r"https://github\.com/[^\s)>\]]+/pull/\d+", result_text):
+        url = match.group(0)
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
 
-    return None
+    return urls

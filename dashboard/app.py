@@ -30,6 +30,7 @@ from scanner.demo_reset import run_demo_reset
 from scanner.devin_integration import (
     create_rebase_session,
     create_stacked_cleanup_session,
+    extract_all_pr_urls,
     extract_pr_url,
     get_session_status,
     poll_session_until_done,
@@ -373,6 +374,39 @@ async def flag_status(request: Request, flag_key: str):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _match_prs_to_flags(
+    pr_urls: list[str],
+    flag_keys: list[str],
+) -> dict[str, str]:
+    """Match PR URLs to flag keys by fetching each PR's title from GitHub.
+
+    The Devin prompt instructs PR titles of the form
+    ``"Remove stale flag: <flag_key>"``.  We fetch each PR's metadata and
+    look for the flag key in the title.
+
+    Returns a dict mapping ``flag_key -> pr_url`` for matched flags.
+    """
+    from scanner.github_stats import fetch_pr_stats
+
+    matched: dict[str, str] = {}
+    remaining_keys = set(flag_keys)
+
+    for url in pr_urls:
+        if not remaining_keys:
+            break
+        stats = fetch_pr_stats(url)
+        if not stats:
+            continue
+        title = (stats.get("title") or "").lower()
+        for fk in list(remaining_keys):
+            if fk.lower() in title:
+                matched[fk] = url
+                remaining_keys.discard(fk)
+                break
+
+    return matched
+
+
 def _refresh_pr_statuses() -> None:
     """Check GitHub for merged/closed PRs and drop them from the queue.
 
@@ -420,40 +454,59 @@ def _refresh_pr_statuses() -> None:
                 state_val = devin_status.get("status_enum", "unknown")
 
                 if state_val in ("finished", "stopped", "blocked"):
-                    found_pr = extract_pr_url(devin_status)
-                    if found_pr:
-                        session["pr_url"] = found_pr
-                        session["status"] = "ready"
-                        state_changed = True
-                        logger.info("%s: Devin finished, PR found: %s", flag_key, found_pr)
+                    stacked = _stacked_sessions.get(sid)
 
-                        # For stacked sessions, update ALL flags sharing this session_id
-                        stacked = _stacked_sessions.get(sid)
-                        if stacked:
-                            for other_key in stacked.get("flag_keys", []):
-                                other_session = _sessions.get(other_key)
-                                if other_session and not other_session.get("pr_url"):
-                                    other_session["pr_url"] = found_pr
-                                    other_session["status"] = "ready"
-                                    logger.info("%s: updated with stacked PR: %s", other_key, found_pr)
+                    if stacked:
+                        # Stacked session: extract ALL PR URLs and match by title
+                        all_pr_urls = extract_all_pr_urls(devin_status)
+                        stacked_keys = stacked.get("flag_keys", [])
 
-                            # Send Phase 2 Slack notification (once per stacked session)
+                        if all_pr_urls:
+                            # Match PRs to flags by title pattern ("Remove stale flag: <key>")
+                            matched = _match_prs_to_flags(all_pr_urls, stacked_keys)
+
+                            for fk, pr_url in matched.items():
+                                fk_session = _sessions.get(fk)
+                                if fk_session:
+                                    fk_session["pr_url"] = pr_url
+                                    fk_session["status"] = "ready"
+                                    logger.info("%s: matched stacked PR: %s", fk, pr_url)
+                            state_changed = True
+
+                            # Flags with no matched PR get the first URL as fallback
+                            fallback_url = all_pr_urls[0]
+                            for fk in stacked_keys:
+                                fk_session = _sessions.get(fk)
+                                if fk_session and not fk_session.get("pr_url"):
+                                    fk_session["pr_url"] = fallback_url
+                                    fk_session["status"] = "ready"
+                                    logger.info("%s: fallback stacked PR: %s", fk, fallback_url)
+
+                            # Send Phase 2 Slack notification (once)
                             if not stacked.get("notified"):
-                                sent = _send_phase2_notification(stacked, found_pr)
+                                sent = _send_phase2_notification(stacked, all_pr_urls)
                                 if sent:
                                     stacked["notified"] = True
+                        else:
+                            # No PRs found — mark all as error
+                            for fk in stacked_keys:
+                                fk_session = _sessions.get(fk)
+                                if fk_session and fk_session.get("status") == "running":
+                                    fk_session["status"] = "error"
+                            state_changed = True
+                            logger.info("Stacked session %s finished but no PRs found", sid)
                     else:
-                        session["status"] = "error"
-                        state_changed = True
-                        logger.info("%s: Devin finished but no PR (state=%s)", flag_key, state_val)
-
-                        # Mark all flags in stacked session as error
-                        stacked = _stacked_sessions.get(sid)
-                        if stacked:
-                            for other_key in stacked.get("flag_keys", []):
-                                other_session = _sessions.get(other_key)
-                                if other_session and other_session.get("status") == "running":
-                                    other_session["status"] = "error"
+                        # Non-stacked (single flag) session
+                        found_pr = extract_pr_url(devin_status)
+                        if found_pr:
+                            session["pr_url"] = found_pr
+                            session["status"] = "ready"
+                            state_changed = True
+                            logger.info("%s: Devin finished, PR found: %s", flag_key, found_pr)
+                        else:
+                            session["status"] = "error"
+                            state_changed = True
+                            logger.info("%s: Devin finished but no PR (state=%s)", flag_key, state_val)
                 continue
 
             # Remove sessions stuck in error/terminal state with no PR
@@ -490,9 +543,10 @@ def _refresh_pr_statuses() -> None:
         logger.info("State refreshed: removed %d, updated others", len(keys_to_remove))
 
 
-def _send_phase2_notification(stacked: dict, pr_url: str) -> bool:
-    """Send Phase 2 Slack DM when a stacked cleanup PR is ready.
+def _send_phase2_notification(stacked: dict, pr_urls: list[str]) -> bool:
+    """Send Phase 2 Slack DM when stacked cleanup PRs are ready.
 
+    *pr_urls* is the list of all PR URLs in the stack (one per flag).
     Returns ``True`` if the notification was sent successfully.
     """
     flag_keys = stacked.get("flag_keys", [])
@@ -518,7 +572,7 @@ def _send_phase2_notification(stacked: dict, pr_url: str) -> bool:
         send_pr_ready_notification(
             email=maintainer_email,
             flag_keys=flag_keys,
-            pr_url=pr_url,
+            pr_urls=pr_urls,
             dashboard_url=dashboard_url,
         )
         return True
@@ -540,13 +594,14 @@ def _find_candidate(flag_key: str) -> FlagCandidate | None:
 
 @app.post("/api/fix-selected")
 def api_fix_selected(request: Request, flag_keys: list[str] = Body(..., embed=True)):
-    """Dispatch a single Devin session to remove all selected flags in one PR.
+    """Dispatch a single Devin session to create a stacked PR chain.
 
     Expects JSON body: ``{"flag_keys": ["flag-a", "flag-b", ...]}``
 
-    All selected flags are assigned the same Devin session ID.  When the
-    session completes, ``_refresh_pr_statuses()`` will update ALL flags
-    with the resulting PR URL and send a Phase 2 Slack DM.
+    Devin creates one branch and one draft PR per flag, each branching off
+    the previous (true stacked PR chain).  When the session completes,
+    ``_refresh_pr_statuses()`` matches each PR to its flag by title and
+    sends a Phase 2 Slack DM listing all PRs in the stack.
     """
     _check_auth(request)
     if not flag_keys:

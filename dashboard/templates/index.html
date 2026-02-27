@@ -103,7 +103,7 @@
             {% if c.status == 'in_progress' and s.get('session_id') %}
             <div class="session-progress">
                 <span class="spinner"></span>
-                <span>Devin is creating a stacked cleanup PR&hellip;</span>
+                <span>Devin is creating stacked cleanup PRs&hellip;</span>
                 <a href="{{ s.url }}" target="_blank" class="session-link">View session</a>
             </div>
             {% elif c.status == 'error' and s.get('session_id') %}
