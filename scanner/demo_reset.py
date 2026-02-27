@@ -12,7 +12,6 @@ Steps:
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 
@@ -368,20 +367,72 @@ def _unleash_auth() -> tuple[str, str] | None:
     return None
 
 
+def _revive_archived_flags(unleash_url: str, flag_names: list[str]) -> list[dict]:
+    """Revive flags that were archived by CodeCull after cleanup PR merges.
+
+    Uses the Unleash Admin API bulk-revive endpoint:
+    ``POST /api/admin/projects/:projectId/revive``
+    with body ``{"features": ["flag-a", ...]}``.
+
+    Returns a list of result dicts.
+    """
+    auth = _unleash_auth()
+    project = os.getenv("UNLEASH_PROJECT", "default")
+    results: list[dict] = []
+
+    if not flag_names:
+        return results
+
+    url = f"{unleash_url}/api/admin/projects/{project}/revive"
+    try:
+        resp = httpx.post(
+            url,
+            auth=auth,
+            json={"features": flag_names},
+            timeout=15,
+        )
+        if resp.status_code < 300:
+            for name in flag_names:
+                results.append({"flag": name, "status": "revived"})
+            logger.info("Revived %d archived flag(s): %s", len(flag_names), flag_names)
+        else:
+            logger.warning(
+                "Unleash revive returned %d: %s", resp.status_code, resp.text[:200],
+            )
+            for name in flag_names:
+                results.append({
+                    "flag": name,
+                    "status": "revive_error",
+                    "detail": f"HTTP {resp.status_code}",
+                })
+    except Exception:
+        logger.exception("Failed to revive archived flags: %s", flag_names)
+        for name in flag_names:
+            results.append({"flag": name, "status": "revive_error", "detail": "exception"})
+
+    return results
+
+
 def reset_unleash_flags(unleash_url: str) -> list[dict]:
     """Ensure all 3 stale flags exist in Unleash with correct settings.
 
     Uses the Unleash Admin API to check for existing flags and re-create
-    any that are missing.  Also resets the stale status.
+    any that are missing.  Flags that were archived by CodeCull after
+    cleanup PR merges are revived first, then stale status is reset.
     """
     results: list[dict] = []
     auth = _unleash_auth()
     project = os.getenv("UNLEASH_PROJECT", "default")
 
+    # First, try to revive all flags in case they were archived
+    all_flag_names = [f["name"] for f in _STALE_FLAGS]
+    revive_results = _revive_archived_flags(unleash_url, all_flag_names)
+    revived_names = {r["flag"] for r in revive_results if r.get("status") == "revived"}
+
     for flag in _STALE_FLAGS:
         name = flag["name"]
 
-        # Check if flag exists
+        # Check if flag exists (either it was already active or we just revived it)
         try:
             resp = httpx.get(
                 f"{unleash_url}/api/admin/projects/{project}/features/{name}",
@@ -389,14 +440,15 @@ def reset_unleash_flags(unleash_url: str) -> list[dict]:
                 timeout=15,
             )
             if resp.status_code == 200:
-                # Flag exists — just make sure stale is set
+                # Flag exists — make sure stale is set
                 httpx.post(
                     f"{unleash_url}/api/admin/projects/{project}/features/{name}/stale/on",
                     auth=auth,
                     timeout=15,
                 )
-                results.append({"flag": name, "status": "exists_reset_stale"})
-                logger.info("Flag %s already exists, reset stale=true", name)
+                status_label = "revived_reset_stale" if name in revived_names else "exists_reset_stale"
+                results.append({"flag": name, "status": status_label})
+                logger.info("Flag %s: %s", name, status_label)
                 continue
         except Exception:
             logger.exception("Error checking flag %s", name)
@@ -407,11 +459,7 @@ def reset_unleash_flags(unleash_url: str) -> list[dict]:
             })
             continue
 
-        # Flag doesn't exist — the flag service seeds on startup but only
-        # if the DB is empty.  We need to insert it directly.
-        # The simplest approach: call the flag service's seed logic by
-        # restarting it, OR insert via a custom endpoint.
-        # For now, we'll note it needs manual re-seed.
+        # Flag doesn't exist (and revive didn't help — it was never created)
         results.append({
             "flag": name,
             "status": "missing",

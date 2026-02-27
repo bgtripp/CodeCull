@@ -425,6 +425,7 @@ def _refresh_pr_statuses() -> None:
     global _candidates, _sessions, _pr_stats
 
     keys_to_remove: list[str] = []
+    _flags_to_archive: list[str] = []
     state_changed = False
 
     # Deduplicate session IDs to avoid polling the same stacked session N times
@@ -539,6 +540,13 @@ def _refresh_pr_statuses() -> None:
             logger.info("PR for %s is %s — removing from queue", flag_key,
                         "merged" if stats.get("merged") else "closed")
             keys_to_remove.append(flag_key)
+            # Archive the flag in Unleash when the cleanup PR is merged
+            if stats.get("merged"):
+                _flags_to_archive.append(flag_key)
+
+    # Archive merged flags in Unleash before removing them from state
+    if _flags_to_archive:
+        _archive_unleash_flags(_flags_to_archive)
 
     if keys_to_remove:
         for key in keys_to_remove:
@@ -613,6 +621,54 @@ def _send_phase2_notification(stacked: dict, pr_urls: list[str]) -> bool:
     except Exception:
         logger.exception("Failed to send Phase 2 Slack notification")
         return False
+
+
+def _archive_unleash_flags(flag_keys: list[str]) -> None:
+    """Archive the given feature flags in Unleash after their cleanup PRs merge.
+
+    Uses the Unleash Admin API bulk-archive endpoint:
+    ``POST /api/admin/projects/:projectId/archive``
+    with body ``{"features": ["flag-a", "flag-b", ...]}``.
+
+    Silently ignores errors (already archived, missing, etc.) so the
+    dashboard refresh is never blocked by Unleash issues.
+    """
+    unleash_url = os.getenv("UNLEASH_URL", "")
+    if not unleash_url:
+        return
+
+    project = os.getenv("UNLEASH_PROJECT", "default")
+    api_token = os.getenv("UNLEASH_ADMIN_TOKEN", "")
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    auth = None
+
+    if api_token:
+        headers["Authorization"] = api_token
+    else:
+        user = os.getenv("UNLEASH_ADMIN_USER", "")
+        password = os.getenv("UNLEASH_ADMIN_PASSWORD", "")
+        if user and password:
+            auth = (user, password)
+
+    url = f"{unleash_url}/api/admin/projects/{project}/archive"
+    try:
+        resp = httpx.post(
+            url,
+            headers=headers,
+            auth=auth,
+            json={"features": flag_keys},
+            timeout=15,
+        )
+        if resp.status_code < 300:
+            logger.info("Archived %d flag(s) in Unleash: %s", len(flag_keys), flag_keys)
+        else:
+            logger.warning(
+                "Unleash archive returned %d: %s",
+                resp.status_code,
+                resp.text[:200],
+            )
+    except Exception:
+        logger.exception("Failed to archive flags in Unleash: %s", flag_keys)
 
 
 def _find_candidate(flag_key: str) -> FlagCandidate | None:
