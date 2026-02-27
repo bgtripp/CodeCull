@@ -467,12 +467,17 @@ def _refresh_pr_statuses() -> None:
                             # Match PRs to flags by title pattern ("Remove stale flag: <key>")
                             matched = _match_prs_to_flags(all_pr_urls, stacked_keys)
 
-                            for fk, pr_url in matched.items():
+                            for fk, matched_url in matched.items():
                                 fk_session = _sessions.get(fk)
                                 if fk_session:
-                                    fk_session["pr_url"] = pr_url
+                                    fk_session["pr_url"] = matched_url
                                     fk_session["status"] = "ready"
-                                    logger.info("%s: matched stacked PR: %s", fk, pr_url)
+                                    logger.info("%s: matched stacked PR: %s", fk, matched_url)
+                                # Eagerly fetch PR stats so line counts appear immediately
+                                if fk not in _pr_stats:
+                                    pr_st = fetch_pr_stats(matched_url)
+                                    if pr_st is not None:
+                                        _pr_stats[fk] = pr_st
                             state_changed = True
 
                             # Flags with no matched PR get the first URL as fallback
@@ -483,9 +488,14 @@ def _refresh_pr_statuses() -> None:
                                     fk_session["pr_url"] = fallback_url
                                     fk_session["status"] = "ready"
                                     logger.info("%s: fallback stacked PR: %s", fk, fallback_url)
+                                    # Eagerly fetch PR stats for fallback matches too
+                                    if fk not in _pr_stats:
+                                        pr_st = fetch_pr_stats(fallback_url)
+                                        if pr_st is not None:
+                                            _pr_stats[fk] = pr_st
 
-                            # Send Phase 2 Slack notification (once, only when terminal)
-                            if is_terminal and not stacked.get("notified"):
+                            # Send Phase 2 Slack notification once all expected PRs are ready
+                            if not stacked.get("notified") and len(all_pr_urls) >= len(stacked_keys):
                                 sent = _send_phase2_notification(stacked, all_pr_urls)
                                 if sent:
                                     stacked["notified"] = True
