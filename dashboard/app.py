@@ -1002,17 +1002,58 @@ def api_session_complete(request: Request):
     mechanism for delivering the Slack DM — the background poller serves only
     as a safety-net fallback.
 
+    Because Devin is still technically "running" when it executes the curl
+    callback (the curl IS the session's last step), the normal ``done_creating``
+    guard inside ``_refresh_pr_statuses()`` may prevent the notification from
+    firing.  After the refresh we do a second pass: for every unnotified
+    stacked session that has *any* PR URLs, we force-send the notification
+    since the callback is the definitive "I'm done" signal.
+
     Auth: Bearer ``SYNC_API_TOKEN``.
     """
     auth_header = request.headers.get("authorization", "")
     if not _SYNC_API_TOKEN or auth_header != f"Bearer {_SYNC_API_TOKEN}":
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    notified_count = 0
+
     with _refresh_lock:
         _refresh_pr_statuses()
 
-    logger.info("Session-complete callback: refresh done")
-    return {"status": "ok", "message": "Refresh triggered"}
+        # Force-send any pending notifications — the callback means Devin is
+        # done, even if the Devin API still reports the session as "running".
+        state_changed = False
+        for sid, stacked in _stacked_sessions.items():
+            if stacked.get("notified"):
+                continue
+            stacked_keys = stacked.get("flag_keys", [])
+            pr_urls: list[str] = []
+            for fk in stacked_keys:
+                fk_session = _sessions.get(fk)
+                if fk_session and fk_session.get("pr_url"):
+                    pr_urls.append(fk_session["pr_url"])
+            unique_urls = list(dict.fromkeys(pr_urls))
+            if unique_urls:
+                logger.info(
+                    "session-complete: force-sending Phase 2 for session %s "
+                    "(%d PRs for %d flags)",
+                    sid, len(unique_urls), len(stacked_keys),
+                )
+                sent = _send_phase2_notification(stacked, unique_urls)
+                if sent:
+                    stacked["notified"] = True
+                    state_changed = True
+                    notified_count += 1
+
+        if state_changed:
+            _apply_state_to_candidates(_candidates)
+            save_state(_STATE_PATH, _sessions, _pr_stats, _stacked_sessions)
+
+    logger.info(
+        "Session-complete callback: refresh done, %d notification(s) sent",
+        notified_count,
+    )
+    return {"status": "ok", "message": "Refresh triggered", "notified": notified_count}
 
 
 # ---------------------------------------------------------------------------
