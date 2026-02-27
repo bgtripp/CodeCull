@@ -359,12 +359,29 @@ _STALE_FLAGS = [
 ]
 
 
-def _unleash_auth() -> tuple[str, str] | None:
-    user = os.getenv("UNLEASH_ADMIN_USER", "")
-    password = os.getenv("UNLEASH_ADMIN_PASSWORD", "")
-    if user and password:
-        return (user, password)
-    return None
+def _unleash_request_kwargs() -> dict:
+    """Return shared ``httpx`` keyword arguments for Unleash Admin API calls.
+
+    Supports two auth methods (checked in order):
+    1. ``UNLEASH_ADMIN_TOKEN`` — sent as the ``Authorization`` header.
+    2. ``UNLEASH_ADMIN_USER`` + ``UNLEASH_ADMIN_PASSWORD`` — HTTP Basic Auth.
+
+    Returns a dict with ``headers`` and optionally ``auth`` keys, ready to
+    be unpacked into any ``httpx.get`` / ``httpx.post`` / etc. call.
+    """
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    auth = None
+
+    api_token = os.getenv("UNLEASH_ADMIN_TOKEN", "")
+    if api_token:
+        headers["Authorization"] = api_token
+    else:
+        user = os.getenv("UNLEASH_ADMIN_USER", "")
+        password = os.getenv("UNLEASH_ADMIN_PASSWORD", "")
+        if user and password:
+            auth = (user, password)
+
+    return {"headers": headers, "auth": auth}
 
 
 def _revive_archived_flags(unleash_url: str, flag_names: list[str]) -> list[dict]:
@@ -376,7 +393,7 @@ def _revive_archived_flags(unleash_url: str, flag_names: list[str]) -> list[dict
 
     Returns a list of result dicts.
     """
-    auth = _unleash_auth()
+    req_kwargs = _unleash_request_kwargs()
     project = os.getenv("UNLEASH_PROJECT", "default")
     results: list[dict] = []
 
@@ -387,7 +404,7 @@ def _revive_archived_flags(unleash_url: str, flag_names: list[str]) -> list[dict
     try:
         resp = httpx.post(
             url,
-            auth=auth,
+            **req_kwargs,
             json={"features": flag_names},
             timeout=15,
         )
@@ -421,7 +438,7 @@ def reset_unleash_flags(unleash_url: str) -> list[dict]:
     cleanup PR merges are revived first, then stale status is reset.
     """
     results: list[dict] = []
-    auth = _unleash_auth()
+    req_kwargs = _unleash_request_kwargs()
     project = os.getenv("UNLEASH_PROJECT", "default")
 
     # First, try to revive all flags in case they were archived
@@ -436,14 +453,14 @@ def reset_unleash_flags(unleash_url: str) -> list[dict]:
         try:
             resp = httpx.get(
                 f"{unleash_url}/api/admin/projects/{project}/features/{name}",
-                auth=auth,
+                **req_kwargs,
                 timeout=15,
             )
             if resp.status_code == 200:
                 # Flag exists — make sure stale is set
                 httpx.post(
                     f"{unleash_url}/api/admin/projects/{project}/features/{name}/stale/on",
-                    auth=auth,
+                    **req_kwargs,
                     timeout=15,
                 )
                 status_label = "revived_reset_stale" if name in revived_names else "exists_reset_stale"
